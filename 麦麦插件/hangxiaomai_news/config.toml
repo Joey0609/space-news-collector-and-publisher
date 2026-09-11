@@ -1,0 +1,9 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[push]
+target_qq = "YOUR_QQ_ID"
+target_groups = ["YOUR_GROUP_ID", "YOUR_GROUP_ID_2"]
+poll_interval = 30
+auto_switch = true

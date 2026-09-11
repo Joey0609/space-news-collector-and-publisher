@@ -1,0 +1,28 @@
+# ---- 环境变量与密钥（绝不上传）----
+.env
+*.env
+!*.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 数据 / 状态 / 输出（可能含隐私或体积大）----
+*.db
+*.sqlite
+*.bak
+output/
+logs/
+*.log
+cookies*.json
+webui.json
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+desktop.ini

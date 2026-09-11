@@ -1,0 +1,43 @@
+{
+  "manifest_version": 2,
+  "version": "1.0.0",
+  "name": "航小麦新闻推送",
+  "description": "检测到值得发布的航天新闻后，以麦麦口吻主动推送到指定QQ私聊。",
+  "author": {
+    "name": "Alioth",
+    "url": "https://github.com/MaiM-with-u"
+  },
+  "license": "GPL-v3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/MaiM-with-u/maibot",
+    "homepage": "https://github.com/MaiM-with-u/maibot"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.2.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "send.text",
+    "send.hybrid",
+    "send.image",
+    "chat.get_stream_by_user_id",
+    "chat.get_stream_by_group_id",
+    "chat.open_session",
+    "llm.generate",
+    "maisaka.context.append",
+    "maisaka.proactive.trigger",
+    "message.get_recent"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "id": "maibot-team.hangxiaomai-news"
+}
