@@ -45,7 +45,7 @@ DEEPSEEK_KEY = os.getenv("DEEPSEEK_KEY", "").strip()
 VISION_MODEL = "deepseek-chat"  # AI兜底判"有意思"用纯文本模型
 
 DEFAULT_PRIVATE = "YOUR_QQ_ID"
-DEFAULT_GROUP = "YOUR_GROUP_ID"
+DEFAULT_GROUP = "YOUR_GROUP_ID_1"
 
 
 def log(msg: str) -> None:

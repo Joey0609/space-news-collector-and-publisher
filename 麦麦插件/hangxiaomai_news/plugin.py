@@ -40,7 +40,7 @@ HX_ROOT = PROJECT_ROOT.parent  # E:\AI程序员\03_实用程序\航小Q\航小�
 PENDING_FILE = HX_ROOT / "配置" / "待推送.json"
 SWITCH_FILE = HX_ROOT / "配置" / "功能开关.toml"
 PUSH_DEFAULT_FILE = HX_ROOT / "配置" / "推送默认.toml"
-# 推送群列表改由插件配置 [push].target_groups 决定（默认 ["YOUR_GROUP_ID"]；可加多个群）
+# 推送群列表改由插件配置 [push].target_groups 决定（默认 ["YOUR_GROUP_ID_1"]；可加多个群）
 MAIBOT_CONFIG = PROJECT_ROOT / "config" / "bot_config.toml"  # 麦麦人设源
 ARCHIVE_FILE = HX_ROOT / "配置" / "内容留档.json"  # 每天前10之外的内容，无新消息时拿来填充
 SENT_EVER_FILE = HX_ROOT / "配置" / "已发记录.json"  # 已推送过的内容，去重用（永不重推）
@@ -82,7 +82,7 @@ class PushConfig(PluginConfigBase):
     __ui_order__ = 1
 
     target_qq: str = Field(default="YOUR_QQ_ID", description="推送到哪个QQ私聊")
-    target_groups: list[str] = Field(default_factory=lambda: ["YOUR_GROUP_ID"], description="推送到哪些QQ群(群号列表)")
+    target_groups: list[str] = Field(default_factory=lambda: ["YOUR_GROUP_ID_1"], description="推送到哪些QQ群(群号列表)")
     poll_interval: int = Field(default=30, description="检测待推送文件的间隔(秒)")
     auto_switch: bool = Field(default=True, description="是否遵守功能开关(新闻推送 off 则不推)")
 

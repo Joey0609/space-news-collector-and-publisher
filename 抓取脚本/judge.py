@@ -47,7 +47,7 @@ VISION_MODEL = "deepseek-chat"  # 语义打标/AI兜底用纯文本模型（不�
 
 # 默认目标（来自规则文件）
 DEFAULT_TARGET_PRIVATE = "YOUR_QQ_ID"
-DEFAULT_TARGET_GROUP = "YOUR_GROUP_ID"
+DEFAULT_TARGET_GROUP = "YOUR_GROUP_ID_1"
 
 
 def log(msg: str) -> None:

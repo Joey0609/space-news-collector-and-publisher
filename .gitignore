@@ -19,6 +19,7 @@ logs/
 *.log
 cookies*.json
 webui.json
+state.json
 
 # ---- 编辑器 / 系统 ----
 .vscode/
