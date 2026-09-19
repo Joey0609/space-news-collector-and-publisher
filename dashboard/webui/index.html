@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>航小麦看板</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+
+<body>
+    <header class="topbar">
+        <div><span class="product-mark">78-UMA</span>
+            <h1>航小麦</h1>
+        </div><span id="updated" class="updated">正在连接</span>
+    </header>
+    <main>
+        <section class="services">
+            <article class="service-card">
+                <div class="service-card__head"><span class="service-icon">采</span>
+                    <div>
+                        <h2>采集服务</h2>
+                        <p id="collect-state">—</p>
+                    </div>
+                </div>
+                <div class="actions"><button data-service="collect">启动</button><button class="secondary"
+                        data-config="collect">配置</button></div>
+            </article>
+            <article class="service-card">
+                <div class="service-card__head"><span class="service-icon">处</span>
+                    <div>
+                        <h2>处理服务</h2>
+                        <p id="process-state">—</p>
+                    </div>
+                </div>
+                <div class="actions"><button data-service="process">启动</button><button class="secondary"
+                        data-config="process">配置</button></div>
+            </article>
+            <article class="service-card">
+                <div class="service-card__head"><span class="service-icon">发</span>
+                    <div>
+                        <h2>分发服务</h2>
+                        <p id="distribute-state">—</p>
+                    </div>
+                </div>
+                <div class="actions"><button data-service="distribute">启动</button><button class="secondary"
+                        data-config="distribute">配置</button></div>
+            </article>
+        </section>
+        <section class="layout">
+            <section class="panel content">
+                <div class="panel-title">
+                    <div><span class="eyebrow">CONTENT</span>
+                        <h2>全部收集内容</h2>
+                    </div><span id="count" class="count">0</span>
+                </div>
+                <div id="items"></div>
+            </section>
+            <aside class="panel summary"><span class="eyebrow">OVERVIEW</span>
+                <h2>运行摘要</h2>
+                <div class="summary-row"><span>待分发</span><b id="pending">0</b></div>
+                <div class="summary-row"><span>环境配置</span><b id="env">—</b></div>
+            </aside>
+        </section>
+    </main>
+    <dialog id="detail-dialog">
+        <div class="detail-head">
+            <div><span class="eyebrow">CONTENT DETAIL</span>
+                <h2 id="detail-title">内容详情</h2>
+            </div><button id="detail-close" class="close">×</button>
+        </div>
+        <div class="detail-tabs"><button data-lang="zh">译文</button><button data-lang="raw" class="secondary">原文</button>
+        </div><textarea id="detail-edit" class="detail-edit" placeholder="编辑译文"></textarea><button
+            id="detail-save">保存译文到数据库</button>
+        <div id="detail-body" class="detail-body"></div>
+        <div id="detail-images" class="detail-images"></div>
+    </dialog>
+    <dialog id="config-dialog">
+        <div class="detail-head">
+            <div><span class="eyebrow">SERVICE SETTINGS</span>
+                <h2 id="config-title">服务配置</h2>
+            </div><button id="config-close" class="close">×</button>
+        </div>
+        <div id="config-fields" class="config-fields"></div>
+        <div class="dialog-actions"><button id="config-cancel" class="secondary">取消</button><button
+                id="config-save">保存配置</button></div>
+    </dialog>
+    <script src="/app.js"></script>
+</body>
+
+</html>

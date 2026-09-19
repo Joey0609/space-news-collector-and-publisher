@@ -21,6 +21,15 @@ cookies*.json
 webui.json
 state.json
 
+# ---- 自检临时产物（会反复重建，不入库）----
+selftest/.sandbox/
+
+# ---- 新版运行期数据与本地配置 ----
+data/*
+!data/README.md
+config/
+
+
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/
