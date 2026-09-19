@@ -13,10 +13,14 @@ from typing import Callable
 
 
 def setup_console_encoding() -> None:
-    """避免 Windows GBK 控制台打印中文崩溃（失败不影响运行）。"""
+    """避免 Windows GBK 控制台打印中文崩溃（失败不影响运行）。
+
+    同时打开行缓冲：输出被父进程（main_flow / 看板）接成管道时不 flush，
+    日志会卡在 8KB 缓冲区里，表现就是"只看得到 loguru、看不到自己的日志"。
+    """
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     except Exception:
         pass
 
@@ -27,7 +31,7 @@ def make_log(log_file: Path, echo: bool = True) -> Callable[[str], None]:
     def log(msg: str) -> None:
         line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
         if echo:
-            print(line)
+            print(line, flush=True)
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             with open(log_file, "a", encoding="utf-8") as f:

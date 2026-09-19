@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import secrets
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, unquote
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -163,26 +165,61 @@ def save_service_config(name: str, updates: dict) -> None:
     path.write_text("\n".join(result) + "\n", encoding="utf-8")
 
 
-def all_items() -> list[dict]:
-    """Read the unified content list from SQLite; JSON is no longer the dashboard source."""
+def all_items(since_id: int = 0, limit: int = 500) -> list[dict]:
+    """Read the unified content list from SQLite; JSON is no longer the dashboard source.
+
+    since_id > 0 时只返回 id 更大的新条目（增量），供前端直接往顶部追加。
+    """
     try:
         import sqlite3
-        db=DATA/'hx.sqlite3'
-        if not db.exists(): return []
-        conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
-        rows=[dict(r) for r in conn.execute('SELECT * FROM items ORDER BY COALESCE(published_ts,0) DESC,id DESC LIMIT 500').fetchall()]
+        db = DATA / "hx.sqlite3"
+        if not db.exists():
+            return []
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        if since_id > 0:
+            cursor = conn.execute(
+                "SELECT * FROM items WHERE id > ? ORDER BY id DESC LIMIT ?",
+                (since_id, limit),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT * FROM items ORDER BY COALESCE(published_ts,0) DESC, id DESC LIMIT ?",
+                (limit,),
+            )
+        rows = [dict(r) for r in cursor.fetchall()]
         conn.close()
         for row in rows:
-            if isinstance(row.get('images'),str):
-                try: row['images']=json.loads(row['images'])
-                except Exception: row['images']=[]
-            row['ori_url']=row.get('ori_url') or row.get('url') or ''
-            row['images']=[str(p) for p in (row.get('images') or []) if str(p).strip()]
-            row['_stage']=row.get('stage','')
+            if isinstance(row.get("images"), str):
+                try:
+                    row["images"] = json.loads(row["images"])
+                except Exception:
+                    row["images"] = []
+            row["ori_url"] = row.get("ori_url") or row.get("url") or ""
+            row["images"] = [str(p) for p in (row.get("images") or []) if str(p).strip()]
+            row["_stage"] = row.get("stage", "")
         return rows
     except Exception as exc:
         print(f"[看板] SQLite 查询失败: {exc}", flush=True)
         return []
+
+
+def item_stats() -> tuple[int, int]:
+    """返回 (总条目数, 当前最大 id)：前者用于计数显示，后者是前端的增量游标。"""
+    try:
+        import sqlite3
+        db = DATA / "hx.sqlite3"
+        if not db.exists():
+            return 0, 0
+        conn = sqlite3.connect(db)
+        row = conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(MAX(id), 0) AS latest FROM items"
+        ).fetchone()
+        conn.close()
+        return int(row[0] or 0), int(row[1] or 0)
+    except Exception as exc:
+        print(f"[看板] SQLite 统计失败: {exc}", flush=True)
+        return 0, 0
 
 
 def services() -> dict:
@@ -201,18 +238,27 @@ def services() -> dict:
     return result
 
 
-def snapshot() -> dict:
+def summary() -> dict:
+    """轻量状态：不含条目正文，供 SSE 每秒推送与前端判断是否需要增量拉取。"""
     pending = read_json(DATA / "queue" / "待推送.json", [])
-    items = all_items()
+    total, latest_id = item_stats()
     return {
         "services": services(),
-        "items": items,
-        "item_count": len(items),
+        "item_count": total,
+        "latest_id": latest_id,
         "pending_count": len(pending) if isinstance(pending, list) else 0,
         "env_ready": (ROOT / ".env").exists(),
         "configurable_services": list(CONFIG_FIELDS),
         "ts": time.time(),
     }
+
+
+def snapshot(since_id: int = 0) -> dict:
+    """since_id > 0 时 items 只包含新条目，前端据此只往顶部插入、不重绘旧内容。"""
+    data = summary()
+    data["items"] = all_items(since_id)
+    data["incremental"] = since_id > 0
+    return data
 
 
 def pump_service_output(name: str, process: subprocess.Popen, log_stream) -> None:
@@ -265,6 +311,9 @@ def start_service(name: str) -> int:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            # 本进程按 UTF-8 读服务输出，整棵子进程树也必须按 UTF-8 写、并且不缓冲，
+            # 否则服务日志会卡在缓冲区，本终端看不到实时输出。
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         PROCESSES[name] = process
@@ -299,12 +348,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def send_file(self, target: Path) -> None:
+    def send_file(self, target: Path, max_age: int = 0) -> None:
+        """Send a file with validators so the browser can cache and revalidate it.
+
+        max_age > 0 用于图片这类不再变动的资源；0 表示每次都回源校验，命中 ETag 走 304。
+        """
         content_types = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+        stat = target.stat()
+        etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+        cache_control = f"private, max-age={max_age}" if max_age else "no-cache"
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", cache_control)
+            self.end_headers()
+            return
         raw = target.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_types.get(target.suffix.lower(), "application/octet-stream"))
         self.send_header("Content-Length", str(len(raw)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
         self.end_headers()
         self.wfile.write(raw)
 
@@ -316,24 +381,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         for _ in range(120):
             try:
-                payload=json.dumps(snapshot(),ensure_ascii=False)
-                self.wfile.write(("data: "+payload+"\n\n").encode('utf-8')); self.wfile.flush(); time.sleep(1)
-            except Exception: break
+                payload = json.dumps(summary(), ensure_ascii=False)
+                self.wfile.write(("data: " + payload + "\n\n").encode("utf-8"))
+                self.wfile.flush()
+                time.sleep(1)
+            except Exception:
+                break
 
     def auth(self) -> bool:
         return self.headers.get("X-HX-Token", "") == token()
 
+    def query_since_id(self) -> int:
+        """Read ?since_id=N for incremental pulls; missing or invalid means a full load."""
+        query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+        try:
+            return max(0, int(query.get("since_id", ["0"])[0]))
+        except (TypeError, ValueError):
+            return 0
+
     def do_GET(self) -> None:
-        if self.path == "/api/snapshot":
-            return self.send_json(200, snapshot())
+        if self.path.startswith("/api/snapshot"):
+            return self.send_json(200, snapshot(since_id=self.query_since_id()))
         if self.path == "/api/stream":
             return self.send_sse()
         if self.path.startswith("/api/image/"):
-            name=self.path.split("/api/image/",1)[1].split('?',1)[0]
-            target=(DATA/'images'/name).resolve()
-            if DATA.joinpath('images').resolve() not in target.parents or not target.is_file():
-                return self.send_json(404,{"error":"image not found"})
-            return self.send_file(target)
+            raw = unquote(self.path.split("/api/image/", 1)[1].split("?", 1)[0])
+            image_root = (DATA / "images").resolve()
+            target = (image_root / raw.replace("\\", "/")).resolve()
+            if image_root not in target.parents or not target.is_file():
+                return self.send_json(404, {"error": "image not found"})
+            return self.send_file(target, max_age=604800)
         if self.path.startswith("/api/service/config/"):
             if not self.auth():
                 return self.send_json(401, {"error": "invalid token"})

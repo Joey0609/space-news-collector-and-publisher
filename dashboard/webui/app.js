@@ -4,6 +4,9 @@ let token = localStorage.getItem("hx_token") || "";
 let cache = new Map();
 let detail = null;
 let activeConfig = "";
+let latestId = 0;
+let loaded = false;
+let lastState = {};
 
 const hints = {
   PROXY_URL: "X 访问代理地址，可留空。",
@@ -43,90 +46,151 @@ function imageOf(item) {
   return item.image || "";
 }
 
-function imageUrl(path) {
-  const clean = String(path || "")
-    .replace(/^.*[\\/](data[\\/]images[\\/]?)/, "")
-    .replace(/^data[\\/]images[\\/]?/, "");
-  return "/api/image/" + encodeURIComponent(clean).replace(/%2F/g, "/");
+function imageList(item) {
+  return Array.isArray(item.images) ? item.images.filter(Boolean) : (item.image ? [item.image] : []);
 }
 
-function render(snapshot) {
+function sourceUrl(item) {
+  return item.ori_url || item.url || "";
+}
+
+function formatDate(value) {
+  const text = String(value || "");
+  const match = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
+  return match ? `${match[1]} ${match[2]}` : text;
+}
+
+function imageUrl(path) {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  const marker = "data/images/";
+  const cut = normalized.lastIndexOf(marker);
+  const relative = (cut >= 0 ? normalized.slice(cut + marker.length) : normalized).replace(/^\/+/, "");
+  return "/api/image/" + relative.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+}
+
+function keyOf(item) {
+  return String(item.id || item.origin_id || item.tweet_id || item.ori_url || item.raw);
+}
+
+function buildItem(item) {
+  const image = imageOf(item);
+  const thumbnail = image
+    ? `<img class="thumb" src="${imageUrl(image)}" alt="内容图片" loading="lazy" decoding="async">`
+    : "";
+
+  const element = document.createElement("article");
+  element.className = "item";
+  element.dataset.key = keyOf(item);
+  element.innerHTML = `
+      <div class="item-main">
+        <b>${esc(item.account || "未知账号")} · ${esc(item.content_type || "内容")}</b>
+        <div class="item-preview">${esc(item.zh || item.raw || "")}</div>
+        <div class="meta item-meta">
+          阶段：${esc(item.stage || item._stage || "未知")} ·
+          分数：${esc(item.score ?? "—")}
+        </div>
+        ${sourceUrl(item) ? `来源：<a class="source-url" href="${esc(sourceUrl(item))}" target="_blank" rel="noopener noreferrer">${esc(sourceUrl(item))}</a>` : ""}
+      </div>
+      ${thumbnail}
+    `;
+  return element;
+}
+
+function renderSummary(state) {
+  lastState = state;
+
   for (const name of ["collect", "process", "distribute"]) {
-    const service = snapshot.services?.[name] || {};
-    const state = $(`#${name}-state`);
+    const service = state.services?.[name] || {};
+    const status = $(`#${name}-state`);
     const button = $(`[data-service="${name}"]`);
 
-    if (state) {
-      state.textContent = (service.state || "已停止") +
+    if (status) {
+      status.textContent = (service.state || "已停止") +
         (service.pid ? ` · PID ${service.pid}` : "");
-      state.className = service.running ? "running" : "stopped";
+      status.className = service.running ? "running" : "stopped";
     }
     if (button) button.textContent = service.running ? "停止" : "启动";
   }
 
-  $("#count").textContent = snapshot.item_count || 0;
-  $("#pending").textContent = snapshot.pending_count || 0;
-  $("#env").textContent = snapshot.env_ready ? "已配置" : "未配置";
+  $("#count").textContent = state.item_count || 0;
+  $("#pending").textContent = state.pending_count || 0;
+  $("#env").textContent = state.env_ready ? "已配置" : "未配置";
   $("#updated").textContent = new Date().toLocaleTimeString();
+}
 
-  const next = new Map(
-    (snapshot.items || []).map((item) => [
-      String(item.id || item.origin_id || item.tweet_id || item.ori_url || item.raw),
-      item,
-    ]),
-  );
-
-  for (const [key, value] of next) cache.set(key, value);
-
+/* 首屏/手动刷新：整表重建一次。返回的条目本身已是"新的在前"。 */
+function replaceItems(items) {
   const box = $("#items");
-  const existing = new Map(
-    [...box.children].map((element) => [element.dataset.key, element]),
-  );
+  box.innerHTML = "";
+  cache.clear();
 
-  for (const [key, item] of next) {
-    let element = existing.get(key);
-    const image = imageOf(item);
-    const thumbnail = image
-      ? `<img class="thumb" src="${imageUrl(image)}" alt="内容图片">`
-      : "";
-
-    const html = `
-      <div class="item-main">
-        <b>${esc(item.account || "未知账号")} · ${esc(item.content_type || "内容")}</b>
-        <div>${esc(item.zh || item.raw || "")}</div>
-        <div class="meta">
-          阶段：${esc(item.stage || "未知")} ·
-          分数：${esc(item.score ?? "—")} ·
-          来源：${esc(item.ori_url || "")}
-        </div>
-      </div>
-      ${thumbnail}
-      <button class="detail-btn" data-detail="${esc(key)}">详情</button>
-    `;
-
-    if (!element) {
-      element = document.createElement("article");
-      element.className = "item new-item";
-      element.dataset.key = key;
-      element.innerHTML = html;
-      box.prepend(element);
-      setTimeout(() => element.classList.remove("new-item"), 500);
-    } else if (element.innerHTML !== html) {
-      element.innerHTML = html;
-    }
+  const fragment = document.createDocumentFragment();
+  for (const item of items) {
+    cache.set(keyOf(item), item);
+    fragment.append(buildItem(item));
   }
+  box.append(fragment);
+}
 
-  for (const element of box.children) {
-    if (!next.has(element.dataset.key)) element.remove();
+/* 增量：只把新条目插到最前面，已存在的卡片完全不碰（图片因此不会重新请求）。 */
+function prependItems(items) {
+  const box = $("#items");
+  const known = new Set([...box.children].map((element) => element.dataset.key));
+  const anchor = box.firstElementChild;
+
+  for (const item of items) {
+    const key = keyOf(item);
+    cache.set(key, item);
+    if (known.has(key)) continue;
+    known.add(key);
+    const element = buildItem(item);
+    if (anchor) box.insertBefore(element, anchor);
+    else box.append(element);
   }
 }
 
-async function snapshot() {
+function removeItem(key) {
+  for (const element of [...$("#items").children]) {
+    if (element.dataset.key === key) element.remove();
+  }
+  cache.delete(key);
+}
+
+function refreshItem(item) {
+  const key = keyOf(item);
+  for (const element of [...$("#items").children]) {
+    if (element.dataset.key === key) element.innerHTML = buildItem(item).innerHTML;
+  }
+  cache.set(key, item);
+}
+
+async function loadAll() {
   try {
-    const response = await fetch("/api/snapshot");
-    render(await response.json());
+    const state = await (await fetch("/api/snapshot")).json();
+    renderSummary(state);
+    replaceItems(state.items || []);
+    latestId = Math.max(latestId, Number(state.latest_id || 0));
+    loaded = true;
   } catch (error) {
     $("#updated").textContent = "连接失败";
+  }
+}
+
+/* 只拉 id 比本地游标更新的条目；没有新内容时一个字节的正文都不传。 */
+async function pullNew() {
+  if (!loaded) return;
+  try {
+    const state = await (await fetch(`/api/snapshot?since_id=${latestId}`)).json();
+    renderSummary(state);
+    const items = state.items || [];
+    if (items.length) prependItems(items);
+    const newest = items.reduce(
+      (max, item) => Math.max(max, Number(item.id) || 0),
+      Number(state.latest_id || 0),
+    );
+    latestId = Math.max(latestId, newest);
+  } catch (error) {
+    /* 保持现有列表不动，下个周期再试 */
   }
 }
 
@@ -135,19 +199,42 @@ function openDetail(key) {
   if (!item) return;
 
   detail = item;
-  $("#detail-title").textContent = `${item.account || "内容"} · ${item.content_type || ""}`;
+  $("#detail-title").textContent = `${item.account || "未知账号"} · ${item.content_type || "内容"}`;
+  const meta = [
+    formatDate(item.date || item.published_date),
+    item.stage || item._stage,
+    item.score !== undefined && item.score !== null ? `评分 ${item.score}` : "评分 —",
+  ].filter(Boolean);
+  $("#detail-meta").innerHTML = meta
+    .map((value) => `<span>${esc(value)}</span>`)
+    .join("");
   $("#detail-edit").value = item.zh || "";
-  showLanguage("zh");
+  $("#detail-fields").textContent = JSON.stringify(item, null, 2);
+  showLanguage("raw");
 
-  $("#detail-images").innerHTML = (Array.isArray(item.images) ? item.images : [])
-    .map((path) => `<img src="${imageUrl(path)}" alt="内容图片">`)
-    .join("") || '<span class="meta">无图片</span>';
+  const images = imageList(item);
+  $("#detail-image-section").hidden = images.length === 0;
+  $("#detail-images").innerHTML = images
+    .map((path) => `<figure><img src="${imageUrl(path)}" alt="内容图片"><figcaption>${esc(path)}</figcaption></figure>`)
+    .join("");
 
+  $("#detail-dialog").querySelector(".detail-scroll").scrollTop = 0;
   $("#detail-dialog").showModal();
 }
 
 function showLanguage(language) {
-  if (detail) $("#detail-body").textContent = detail[language] || "暂无内容";
+  if (!detail) return;
+  const isFields = language === "fields";
+  const isTranslation = language === "zh";
+  $("#detail-body").textContent = isFields
+    ? ""
+    : (isTranslation ? (detail.zh || "暂无译文") : (detail.raw || "暂无原文"));
+  $("#detail-body").hidden = isFields;
+  $("#detail-fields").hidden = !isFields;
+  $("#translation-editor").hidden = !isTranslation;
+  document.querySelectorAll("[data-lang]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.lang === language);
+  });
 }
 
 async function saveDetail() {
@@ -161,18 +248,33 @@ async function saveDetail() {
 
   if (!response.ok) return alert("保存失败");
   detail.zh = $("#detail-edit").value;
+  refreshItem(detail);
   $("#detail-dialog").close();
-  await snapshot();
+}
+
+async function deleteDetail() {
+  if (!detail?.id) return alert("这条内容没有有效数据库 ID");
+  if (!confirm(`确定删除「${detail.account || "这条推文"}」吗？删除后不可恢复。`)) return;
+
+  const response = await fetch("/api/item/delete", {
+    method: "POST",
+    headers: await auth(),
+    body: JSON.stringify({ id: detail.id }),
+  });
+  if (!response.ok) return alert("删除失败，请检查看板权限或服务日志");
+  const key = keyOf(detail);
+  detail = null;
+  removeItem(key);
+  $("#detail-dialog").close();
 }
 
 async function toggleService(name) {
-  const current = await (await fetch("/api/snapshot")).json();
   const response = await fetch("/api/service/toggle", {
     method: "POST",
     headers: await auth(),
     body: JSON.stringify({
       service: name,
-      enabled: !current.services?.[name]?.running,
+      enabled: !lastState.services?.[name]?.running,
     }),
   });
   if (!response.ok) alert("操作失败");
@@ -246,8 +348,15 @@ async function saveConfig() {
 }
 
 document.addEventListener("click", (event) => {
+  const detailDialog = $("#detail-dialog");
   const detailButton = event.target.closest("[data-detail]");
   if (detailButton) openDetail(detailButton.dataset.detail);
+
+  const item = event.target.closest(".item[data-key]");
+  if (item && !event.target.closest("a, button")) openDetail(item.dataset.key);
+
+  const sourceLink = event.target.closest(".source-url");
+  if (sourceLink) event.stopPropagation();
 
   const languageButton = event.target.closest("[data-lang]");
   if (languageButton) showLanguage(languageButton.dataset.lang);
@@ -258,12 +367,30 @@ document.addEventListener("click", (event) => {
   const configButton = event.target.closest("[data-config]");
   if (configButton) openConfig(configButton.dataset.config);
 
-  if (event.target.id === "detail-close") $("#detail-dialog").close();
+  if (event.target.id === "detail-close") detailDialog.close();
   if (event.target.id === "detail-save") saveDetail();
+  if (event.target.id === "detail-delete") deleteDetail();
   if (event.target.id === "config-close" || event.target.id === "config-cancel") $("#config-dialog").close();
   if (event.target.id === "config-save") saveConfig();
+
+  // Click on the backdrop (the <dialog> element itself is the outside area)
+  // closes the read-only detail view. Tracked from mouseup so that a text
+  // selection drag started inside the panel cannot close it by accident.
+  if (event.target === detailDialog && detailDialog.dataset.backdropPress === "1") {
+    detailDialog.close();
+  }
+  delete detailDialog.dataset.backdropPress;
 });
 
-snapshot();
+document.addEventListener("mousedown", (event) => {
+  const detailDialog = $("#detail-dialog");
+  if (event.target === detailDialog) detailDialog.dataset.backdropPress = "1";
+});
+
+loadAll();
 const eventStream = new EventSource("/api/stream");
-eventStream.onmessage = (event) => render(JSON.parse(event.data));
+eventStream.onmessage = (event) => {
+  const state = JSON.parse(event.data);
+  renderSummary(state);
+  if (Number(state.latest_id || 0) > latestId) pullNew();
+};

@@ -16,6 +16,7 @@
    - 待推送队列与去重规则在 process/queue.py。
 """
 import json
+import os
 import subprocess
 import sys
 import argparse
@@ -53,6 +54,9 @@ def run_module(script: str, *args: str) -> bool:
             [str(VENV_PY), str(module_dir / script), *args],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             encoding="utf-8", errors="replace", bufsize=1,
+            # 我们按 UTF-8 读子进程输出，就必须让子进程按 UTF-8 写（管道下 Windows 默认 GBK）；
+            # 同时禁用缓冲，否则子模块日志会卡在缓冲区、看板终端看不到实时输出。
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
             creationflags=no_window,
         )
         for line in r.stdout:

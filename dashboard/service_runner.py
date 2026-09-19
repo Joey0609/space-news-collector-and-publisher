@@ -43,7 +43,9 @@ def configured_interval(name: str) -> int:
 def run_command(name: str) -> int:
     command = COMMANDS[name]
     print(f"[{name}] 开始一轮", flush=True)
-    result = subprocess.run(command, cwd=ROOT)
+    # 看板按 UTF-8 读本进程输出；本进程也要让子进程按 UTF-8 写、并且不缓冲。
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+    result = subprocess.run(command, cwd=ROOT, env=env)
     print(f"[{name}] 本轮结束，退出码 {result.returncode}", flush=True)
     return result.returncode
 

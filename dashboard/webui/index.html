@@ -64,16 +64,36 @@
         </section>
     </main>
     <dialog id="detail-dialog">
-        <div class="detail-head">
-            <div><span class="eyebrow">CONTENT DETAIL</span>
+        <header class="detail-head">
+            <div class="detail-head__text">
+                <span class="eyebrow">CONTENT DETAIL</span>
                 <h2 id="detail-title">内容详情</h2>
-            </div><button id="detail-close" class="close">×</button>
+                <div class="detail-meta" id="detail-meta"></div>
+            </div>
+            <button id="detail-close" class="close" aria-label="关闭">×</button>
+        </header>
+        <div class="detail-scroll">
+            <div class="detail-tabs" role="tablist">
+                <button data-lang="raw" class="active">原文</button>
+                <button data-lang="zh">译文</button>
+                <button data-lang="fields">原始字段</button>
+            </div>
+            <section class="detail-reading">
+                <div id="detail-body" class="detail-body"></div>
+                <pre id="detail-fields" class="detail-fields"></pre>
+            </section>
+            <section id="translation-editor" class="translation-editor" hidden>
+                <textarea id="detail-edit" class="detail-edit" placeholder="编辑译文"></textarea>
+                <button id="detail-save">保存译文到数据库</button>
+            </section>
+            <section id="detail-image-section" class="detail-image-section" hidden>
+                <div class="detail-section-title">附件图片</div>
+                <div id="detail-images" class="detail-images"></div>
+            </section>
         </div>
-        <div class="detail-tabs"><button data-lang="zh">译文</button><button data-lang="raw" class="secondary">原文</button>
-        </div><textarea id="detail-edit" class="detail-edit" placeholder="编辑译文"></textarea><button
-            id="detail-save">保存译文到数据库</button>
-        <div id="detail-body" class="detail-body"></div>
-        <div id="detail-images" class="detail-images"></div>
+        <footer class="detail-footer">
+            <button id="detail-delete" class="danger">删除此条推文</button>
+        </footer>
     </dialog>
     <dialog id="config-dialog">
         <div class="detail-head">

@@ -15,7 +15,6 @@ def download_image(tweet_id, url: str, idx: int = 0,
     """下载推文媒体图（仅真图），返回本地路径；非真图/失败返回 ''. 成功失败都写日志。"""
     if not is_real_media_url(url):
         return ""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     base = url.split("?")[0]
     for suffix in ["?name=orig", "?name=large", ""]:
         try:

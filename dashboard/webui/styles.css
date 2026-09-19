@@ -532,22 +532,211 @@ dialog::backdrop {
     font-size: 12px
 }
 
-/* Compatibility styles for the detail/config UI. */
+/* ---- content detail dialog ---- */
+[hidden] {
+    display: none !important
+}
+
+#detail-dialog[open] {
+    display: flex;
+    flex-direction: column
+}
+
 .detail-head {
     display: flex;
-    justify-content: space-between;
     align-items: flex-start;
-    gap: 24px;
-    padding: 26px 28px 20px;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 20px 24px 16px;
     background: linear-gradient(135deg, #f8fbff, #eef5ff);
     border-bottom: 1px solid #dbe8fa
 }
 
+.detail-head__text {
+    min-width: 0
+}
+
 .detail-head h2 {
-    margin: 5px 0 7px;
-    font-size: 23px;
+    margin: 4px 0 0;
+    font-size: 21px;
     letter-spacing: -.02em
 }
+
+.detail-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px
+}
+
+.detail-meta span {
+    padding: 3px 9px;
+    border: 1px solid #dbe8fa;
+    border-radius: 999px;
+    background: #fff;
+    color: #4a5c78;
+    font-size: 12px;
+    font-weight: 600
+}
+
+.detail-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 16px 24px 20px
+}
+
+.detail-tabs {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 12px;
+    background: #eef3fb
+}
+
+.detail-tabs button {
+    padding: 7px 16px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: #4a5c78;
+    font-size: 13px;
+    font-weight: 650;
+    box-shadow: none
+}
+
+.detail-tabs button:hover {
+    background: #e2ebf9;
+    transform: none;
+    box-shadow: none
+}
+
+.detail-tabs button.active {
+    background: #fff;
+    color: var(--blue);
+    box-shadow: 0 2px 8px rgba(25, 55, 95, .12)
+}
+
+.detail-tabs button.active:hover {
+    background: #fff
+}
+
+.detail-reading {
+    margin-top: 12px;
+    padding: 16px 18px;
+    border: 1px solid #e2eaf5;
+    border-radius: 14px;
+    background: #fbfdff
+}
+
+.detail-body {
+    max-height: 42vh;
+    overflow: auto;
+    color: #24344d;
+    font-size: 14px;
+    line-height: 1.75;
+    white-space: pre-wrap;
+    word-break: break-word
+}
+
+.detail-fields {
+    max-height: 42vh;
+    overflow: auto;
+    margin: 0;
+    color: #334155;
+    font: 12px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word
+}
+
+.translation-editor {
+    margin-top: 12px
+}
+
+.detail-edit {
+    display: block;
+    width: 100%;
+    min-height: 150px;
+    margin: 0;
+    padding: 13px 14px;
+    border: 1px solid #cdd8e8;
+    border-radius: 12px;
+    color: #1e2a3b;
+    font: inherit;
+    line-height: 1.65;
+    resize: vertical
+}
+
+.detail-edit:focus {
+    outline: 0;
+    border-color: #4d7eea;
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, .12)
+}
+
+.translation-editor button {
+    margin-top: 10px
+}
+
+.detail-image-section {
+    margin-top: 20px
+}
+
+.detail-section-title {
+    margin-bottom: 10px;
+    color: #31415c;
+    font-size: 13px;
+    font-weight: 750
+}
+
+.detail-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px
+}
+
+.detail-images figure {
+    margin: 0;
+    max-width: 100%
+}
+
+.detail-images img {
+    display: block;
+    max-width: 100%;
+    max-height: 460px;
+    border-radius: 12px;
+    object-fit: contain;
+    box-shadow: 0 8px 24px rgba(25, 55, 95, .1)
+}
+
+.detail-images figcaption {
+    margin-top: 5px;
+    color: var(--muted);
+    font-size: 11px;
+    word-break: break-all
+}
+
+.detail-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 12px 24px;
+    background: #fafcff;
+    border-top: 1px solid var(--line)
+}
+
+.danger {
+    background: #fff;
+    color: #c53030;
+    border-color: #f0b4b4
+}
+
+.danger:hover {
+    background: #fee2e2;
+    color: #a61b1b;
+    box-shadow: none
+}
+
+
 
 .config-field {
     min-width: 0
@@ -598,97 +787,31 @@ dialog::backdrop {
     display: block
 }
 
-.detail-tabs {
-    display: flex;
-    gap: 10px;
-    padding: 20px 28px 0
-}
-
-.detail-edit {
-    display: block;
-    width: calc(100% - 56px);
-    min-height: 140px;
-    margin: 18px 28px;
-    padding: 12px;
-    border: 1px solid #cdd8e8;
-    border-radius: 10px;
-    font: inherit;
-    resize: vertical
-}
-
-.detail-body {
-    padding: 0 28px 18px;
-    white-space: pre-wrap;
-    line-height: 1.65
-}
-
-.detail-images {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    padding: 0 28px 24px
-}
-
-.detail-images img {
-    max-width: 100%;
-    max-height: 320px;
-    border-radius: 10px;
-    object-fit: contain
-}
-
 .item {
-    position: relative
+    position: relative;
+    cursor: pointer;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px;
+    transition: background .18s ease
 }
 
-.item-main {
-    padding-right: 90px
-}
-
-.thumb {
-    float: right;
-    width: 72px;
-    height: 72px;
-    object-fit: cover;
-    border-radius: 10px;
-    margin-left: 12px
-}
-
-.detail-btn {
-    position: absolute;
-    right: 0;
-    top: 16px;
-    padding: 6px 10px;
-    font-size: 12px
-}
+.item:hover { background: #f8fbff }
+.item-main { min-width: 0; padding-right: 0 }
+.item-preview { margin-top: 6px; line-height: 1.65; white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden }
+.source-link{display:block;max-width:100%;margin-top:9px;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.source-link:hover{text-decoration:none}.source-url{color:var(--blue);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:2px}.source-url:hover{color:#1d4ed8}
+.thumb { float: none; width: 150px; height: 110px; object-fit: cover; border-radius: 10px; margin: 0; align-self: start }
 
 @media(max-width:640px) {
-    .detail-head {
-        padding: 20px
-    }
-
-    .detail-tabs {
-        padding-left: 20px;
-        padding-right: 20px
-    }
-
-    .detail-edit {
-        width: calc(100% - 40px);
-        margin-left: 20px;
-        margin-right: 20px
-    }
-
-    .detail-body,
-    .detail-images {
-        padding-left: 20px;
-        padding-right: 20px
-    }
-
-    .item-main {
-        padding-right: 0
-    }
-
-    .detail-btn {
-        position: static;
-        margin-top: 10px
-    }
+    .detail-head { padding: 16px 18px 14px }
+    .detail-head h2 { font-size: 19px }
+    .detail-scroll { padding: 14px 18px 18px }
+    .detail-tabs { display: flex; width: 100% }
+    .detail-tabs button { flex: 1 1 auto; padding: 7px 10px; font-size: 12px }
+    .detail-reading { padding: 13px 14px }
+    .detail-body, .detail-fields { max-height: 38vh }
+    .detail-footer { padding: 10px 18px }
+    .item-main { padding-right: 0 }
+    .item { grid-template-columns: 1fr }
+    .thumb { width: 100%; height: auto; max-height: 240px }
 }
