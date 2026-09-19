@@ -587,9 +587,18 @@ dialog::backdrop {
     line-height: 1.6
 }
 
+/* 引用（quote）块：被引用那条的正文/译文；边框区分一下，长文本自动换行 */
+.detail-quoted {
+    white-space: pre-wrap;
+    padding: 8px 10px;
+    border-left: 3px solid var(--blue-soft);
+    background: rgba(37, 99, 235, .05);
+    border-radius: 6px;
+    word-break: break-word
+}
+
 /* AI 标题 / 判定 / 重要度 / 标签 小圆片 */
-.item-title {
-    margin-top: 2px;
+.item-title {    margin-top: 2px;
     font-weight: 600;
     font-size: 14px
 }

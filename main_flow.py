@@ -82,16 +82,25 @@ def run_module(script: str, *args: str) -> bool:
 
 
 def collect_should_send() -> list:
-    """从 SQLite 读取 final_decision='发' 的内容，生成分发队列字段。"""
+    """从 SQLite 读取 decision='发' 的内容，生成分发队列字段。
+
+    分数在库里分两列存（ai_score AI 价值分 / rules_score 规则分），队列里统一成 score 给分发端用：
+    score = ai_score 有值就用它，否则用 rules_score。
+    """
     from process.db import rows as db_rows
     should=[]
     for n in db_rows():
-        if str(n.get("final_decision") or n.get("decision")) != "发": continue
+        if str(n.get("decision") or "") != "发": continue
         images=n.get("images") or []
         if isinstance(images,str):
             try: images=json.loads(images)
             except Exception: images=[]
-        should.append({"id":n.get("id"),"account":n.get("account",""),"orig_account":n.get("orig_account",""),"forward_comment":n.get("forward_comment",""),"zh":n.get("zh",""),"raw":n.get("raw",""),"images":images,"ori_url":n.get("ori_url",""),"score":n.get("score",0),"date":n.get("date",""),"content_type":n.get("content_type","")})
+        score = n.get("ai_score")
+        if score is None:
+            score = n.get("rules_score")
+        if score is None:
+            score = 0
+        should.append({"id":n.get("id"),"account":n.get("account",""),"orig_account":n.get("orig_account",""),"forward_comment":n.get("forward_comment",""),"zh":n.get("zh",""),"raw":n.get("raw",""),"images":images,"ori_url":n.get("ori_url",""),"score":score,"date":n.get("date",""),"content_type":n.get("content_type","")})
     return should
 
 

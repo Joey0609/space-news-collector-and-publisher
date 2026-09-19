@@ -66,14 +66,31 @@ def forward_line(item: dict, logger=None) -> str:
     return (f"转发@{fa}：" + tr) if fa else ("转发者：" + tr)
 
 
+def quoted_text(item: dict) -> str:
+    """引用推文里【被引用的那条】的展示块；没有引用返回 ''。
+
+    优先用被引用正文的译文（items.quoted_zh），模型没给译文时退回原文。
+    """
+    raw = str(item.get("quoted_raw") or "").strip()
+    zh = str(item.get("quoted_zh") or "").strip()
+    if not raw and not zh:
+        return ""
+    who = str(item.get("quoted_account") or "").strip()
+    body = zh or raw
+    return (f"【引用 @{who}】\n{body}" if who else f"【引用】\n{body}")
+
+
 def body_text(item: dict) -> str:
-    """正文（来源行 + 译文 + 转发评论），即"纯转述"模式下的一条消息文本。"""
+    """正文（来源行 + 译文 + 转发评论 + 被引用内容），即"纯转述"模式下的一条消息文本。"""
     src = build_source_line(item)
     body = str(item.get("zh") or item.get("raw") or "").strip()
     text = (src + "\n\n" + body) if src else body
     fl = forward_line(item)
     if fl:
         text += "\n\n" + fl
+    qt = quoted_text(item)
+    if qt:
+        text += "\n\n" + qt
     return text
 
 

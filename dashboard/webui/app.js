@@ -280,7 +280,7 @@ function imageList(item) {
 }
 
 function sourceUrl(item) {
-  return item.ori_url || item.url || "";
+  return item.ori_url || "";
 }
 
 function formatDate(value) {
@@ -577,7 +577,7 @@ function openDetail(key) {
     ? `${title} · ${item.account || "未知账号"}`
     : `${item.account || "未知账号"} · ${item.content_type || "内容"}`;
   const meta = [
-    formatDate(item.date || item.published_date),
+    formatDate(item.date),
     item.stage || item._stage,
     scoreOf(item) ? `${scoreOf(item).label} ${scoreOf(item).value}` : "分数 —",
     item.rules_score !== null && item.rules_score !== undefined ? `规则分 ${item.rules_score}` : "",
@@ -595,6 +595,23 @@ function openDetail(key) {
   const summaryBox = $("#detail-summary");
   summaryBox.textContent = summary ? `AI 要点：${summary}` : "";
   summaryBox.hidden = !summary;
+
+  // 引用（quote）：被引用那条的正文/译文 + 链接。有引用的条目第 3 盏灯会被强制放行，
+  // 所以这里也标一句，能看到"为什么这条没被判成评价"。
+  const quotedBox = $("#detail-quoted");
+  const quotedRaw = String(item.quoted_raw || "").trim();
+  const quotedZh = String(item.quoted_zh || "").trim();
+  if (quotedRaw || quotedZh) {
+    const who = String(item.quoted_account || "").trim();
+    const url = String(item.quoted_url || "").trim();
+    const head = `引用了 @${who || "?"}（第 3 盏灯自动放行）`;
+    const link = url ? ` ${url}` : "";
+    quotedBox.textContent = `${head}${link}\n${quotedZh || quotedRaw}`;
+    quotedBox.hidden = false;
+  } else {
+    quotedBox.textContent = "";
+    quotedBox.hidden = true;
+  }
   $("#detail-edit").value = item.zh || "";
   $("#detail-fields").textContent = JSON.stringify(item, null, 2);
   showLanguage("raw");

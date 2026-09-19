@@ -42,8 +42,8 @@ collect/news_fetch.py
                                  产出：zh 译文 / 四盏灯 is_news·not_repeat·not_comment·not_sensitive /
                                  ai_score AI 价值分(0~100) / ai_title / ai_summary / importance / ai_tags，
                                  stage=translated
-  -> process/judge.py            四绿→发、任一红→丢（老条目走规则分+阈值），score=AI分/rules_score/decision，stage=judged
-  -> process/ai_fallback.py      final_decision，stage=processed
+  -> process/judge.py            四绿→发、任一红→丢（老条目走规则分+阈值），rules_score/decision/reason，stage=judged
+  -> process/ai_fallback.py      decision（最终判定直接写回），stage=processed
   -> data/queue/待推送.json
   -> distribute/maibot 或 distribute/alison
 ```
@@ -104,6 +104,10 @@ collect/news_fetch.py
 
 后端：`dashboard/server.py`，标准库 HTTP、JSON API、SSE、token、审计、采集/处理/自检操作。
 前端：`dashboard/webui/`，原生 HTML/CSS/JS，深色界面、响应式布局、队列动画、减少动画模式。
+
+启动器（根目录，用户日常入口）：`run_dashboard.bat` → `run_dashboard.ps1` → 起服务 + 自动开 `http://127.0.0.1:8787`；
+`run_dashboard.vbs` 是静默版。**`run_dashboard.ps1` 必须存成 UTF-8 带 BOM**：Windows PowerShell 5.1 对无 BOM 的 .ps1
+按 GBK 解码，中文注释/提示会变乱码并报语法错（自检 `check_dashboard.py` 里有断言盯着 BOM 和"旧 run_main_flow.* 已删除"）。
 
 实时与分页（看板要和采集/翻译同步）：
 

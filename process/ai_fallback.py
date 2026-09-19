@@ -6,7 +6,7 @@
       有意思则硬发，没意思则丢。
 
 输入：output/judged_*.json（模块2输出，只处理 decision="AI兜底" 的条目）
-输出：output/fallback_*.json（每条都带 final_decision，模块5 只挑 "发" 的）
+输出：数据库 items.decision（最终判定直接覆盖写回 decision，模块5 只挑 "发" 的）
 
 运行：
     <venv>/Scripts/python.exe ai_fallback.py [judged.json路径]
@@ -57,8 +57,12 @@ async def main():
     conn = open_db()
     for n in judged:
         verdict = ai_decide(n, user_pref, group_pref, log) if n.get("decision") == "AI兜底" else n.get("decision", "丢")
-        conn.execute("UPDATE items SET final_decision=?, stage='processed', rev=COALESCE(rev,0)+1 WHERE id=?", (verdict, n.get("id")))
-        log(f"[AI兜底] @{n.get('account','?')} 分{n.get('score')} -> {verdict} | {n.get('zh','')}")
+        # 最终判定直接写回 decision（以前另存 final_decision，两列 100% 相同，已合并）
+        conn.execute("UPDATE items SET decision=?, stage='processed', rev=COALESCE(rev,0)+1 WHERE id=?", (verdict, n.get("id")))
+        score = n.get("ai_score")
+        if score is None:
+            score = n.get("rules_score")
+        log(f"[AI兜底] @{n.get('account','?')} 分{score} -> {verdict} | {n.get('zh','')}")
     conn.commit()
     conn.close()
     log(f"[结果] 数据库最终处理 {len(judged)} 条")

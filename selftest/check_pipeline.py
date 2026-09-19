@@ -61,8 +61,30 @@ import ai as llm                       # noqa: E402
 import sources.x.x_client as xc        # noqa: E402
 import sources.x.scan as scan          # noqa: E402
 from sources.x import ADAPTER          # noqa: E402
+import sources as registry             # noqa: E402
 
 check("统一 X adapter", ADAPTER.name == "x" and callable(ADAPTER.collect))
+
+print("[1b] 源注册表：自动发现 + 遍历")
+check("注册表发现了 x 源", [s.name for s in registry.all_sources()] == ["x"],
+      [getattr(s, "name", "?") for s in registry.all_sources()])
+check("enabled_sources() 默认返回全部源",
+      [s.name for s in registry.enabled_sources()] == ["x"])
+check("enabled_sources(['x']) 能按名字挑",
+      [s.name for s in registry.enabled_sources(["x"])] == ["x"])
+check("未知源名不炸、只是跳过", registry.enabled_sources(["nope"]) == [])
+check("每个源都有 name/platform/collect", all(
+    isinstance(s.name, str) and isinstance(s.platform, str) and callable(s.collect)
+    for s in registry.all_sources()))
+check("collect_all 可调用", callable(registry.collect_all))
+check("CollectResult 契约可用",
+      registry.CollectResult(source="x").items == []
+      and registry.CollectResult(source="x").error == "")
+check("注册表跳过下划线开头的模板", "_template" not in [s.name for s in registry.all_sources()])
+import importlib.util as _ilu             # noqa: E402
+check("已删除被同名包遮蔽的 sources/x.py",
+      _ilu.find_spec("sources.x") is not None
+      and not (SEED / "sources" / "x.py").exists())
 
 check("空 WATCH_ACCOUNT 有默认值", bool(env.WATCH_ACCOUNT))
 check("空 COOKIES_PATH 不等于当前目录", str(env.COOKIES_PATH) != ".")
@@ -122,13 +144,15 @@ class _Media:
 
 
 class _Tweet:
-    def __init__(self, tid=1, text="hello world", date=None, media=None, rt=None, qt=None):
+    def __init__(self, tid=1, text="hello world", date=None, media=None, rt=None, qt=None,
+                 author=None):
         self.id = tid
         self.rawContent = text
         self.date = date
         self.media = media
         self.retweetedTweet = rt
         self.quotedTweet = qt
+        self.author = author
 
 
 scan.download_image = lambda tid, url, i=0, log=print, day="": f"/tmp/{tid}_{i}.jpg"
@@ -146,6 +170,30 @@ rt_missing = _Tweet(tid=101, text="RT @NASA: something")
 check("原帖缺失的转推跳过", scan._build_new_item("x", rt_missing, 1234, {}, print) is None)
 empty_t = _Tweet(tid=102, text="")
 check("无文本跳过", scan._build_new_item("x", empty_t, 1234, {}, print) is None)
+
+print("[4b] 引用（quote）：被引用内容随条目入库")
+quote_logs = []
+_Author = type("_Author", (), {"username": "NASA"})
+qpic = _Photo("https://pbs.twimg.com/media/QQQ.jpg?name=small")
+quoted_t = _Tweet(tid=500, text="被引用的正文内容", media=_Media(photos=[qpic]), author=_Author())
+quote_t = _Tweet(tid=103, text="我的一句话感想", media=_Media(), qt=quoted_t, author=_Author())
+qout = scan._build_new_item("elonmusk", quote_t, 1234, {}, quote_logs.append)
+check("引用：被引用作者入库", bool(qout) and qout["quoted_account"] == "NASA",
+      qout and qout.get("quoted_account"))
+check("引用：被引用正文入库", bool(qout) and qout["quoted_raw"] == "被引用的正文内容")
+check("引用：被引用链接入库", bool(qout) and qout["quoted_url"] == "https://x.com/NASA/status/500",
+      qout and qout.get("quoted_url"))
+check("引用：被引用图片一并下载并合并进 images",
+      bool(qout) and qout["images"] == ["/tmp/103_0.jpg"], qout and qout.get("images"))
+check("引用：quoted_zh 交给翻译阶段，初始为空", bool(qout) and qout["quoted_zh"] == "")
+check("引用：内容类型仍是引用", bool(qout) and qout["content_type"] == "引用")
+check("引用：采集日志有 [引用] 行",
+      any("[引用]" in line for line in quote_logs), quote_logs)
+check("引用：日志里被引用正文不截断",
+      any("被引用的正文内容" in line for line in quote_logs))
+check("无引用时 quoted_* 全是空",
+      bool(out) and out["quoted_account"] == "" and out["quoted_raw"] == ""
+      and out["quoted_url"] == "")
 
 print("[5] JSON 读写工具")
 tmp = SANDBOX / "_t.json"
@@ -243,13 +291,33 @@ print("[7] 数据库迁移：旧库要能补出 AI 判定/标签/重要度 相�
 import collect.db as cdb  # noqa: E402
 
 NEW_COLUMNS = {"ai_tags", "is_news", "not_repeat", "not_comment", "not_sensitive", "repeat_of",
-               "ai_title", "ai_summary", "importance", "meta_attempts", "meta_error", "rev"}
+               "ai_title", "ai_summary", "importance", "meta_attempts", "meta_error", "rev",
+               # 引用（quote）：被引用那条也随条目存下来
+               "quoted_account", "quoted_raw", "quoted_zh", "quoted_url"}
 conn = sqlite3.connect(":memory:")
 conn.execute("CREATE TABLE items(id INTEGER PRIMARY KEY, raw TEXT, zh TEXT DEFAULT '')")
 cdb.ensure_schema(conn)
 cols = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
 check("旧表补出新列", NEW_COLUMNS <= cols, sorted(NEW_COLUMNS - cols))
 check("原有数据不丢", conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0)
+# 精简掉的列不能再被加回来（2026-09 那次瘦身）
+REMOVED_COLUMNS = {"tweet_id", "score", "labels", "final_decision",
+                   "published_ts", "published_date", "title", "url", "has_media"}
+check("删掉的列不会被重新建出来", not (cols & REMOVED_COLUMNS), sorted(cols & REMOVED_COLUMNS))
+# 老库（还带着这些列）跑 ensure_schema：不能把已删的空列又建出来，也不该动已存在的旧列
+# （清掉旧列是 tools/drop_columns.py 的活，ensure_schema 只做"加列"）
+legacy = sqlite3.connect(":memory:")
+legacy.execute("CREATE TABLE items(id INTEGER PRIMARY KEY, raw TEXT, zh TEXT DEFAULT '',"
+               " tweet_id TEXT, score INTEGER, labels TEXT, final_decision TEXT)")
+cdb.ensure_schema(legacy)
+legacy_cols = {row[1] for row in legacy.execute("PRAGMA table_info(items)")}
+check("ensure_schema 不会把删掉的空列建出来",
+      not (legacy_cols & {"published_ts", "published_date", "title", "url", "has_media"}),
+      sorted(legacy_cols & {"published_ts", "published_date", "title", "url", "has_media"}))
+check("老库已有的列原样保留（等 drop_columns 处理）",
+      {"tweet_id", "score", "labels", "final_decision"} <= legacy_cols)
+check("唯一键还在（防重复入库）", "UNIQUE" in cdb.SCHEMA.upper() and "dedup_key" in cdb.SCHEMA)
+legacy.close()
 conn.close()
 
 print("[8] 翻译队列判定：哪些要翻、哪些绝不重翻")
@@ -302,9 +370,11 @@ class _Recorder:
 
     def __init__(self):
         self.sql = []
+        self.params = []
 
     def execute(self, sql, params=()):
         self.sql.append(sql)
+        self.params.append(params)
         return self
 
 
@@ -315,6 +385,47 @@ tdb.save_meta_ok(recorder, {"id": 6, "zh": "已有译文"},
                   "tags": ["领域:发射"]}, 1)
 check("补标的 UPDATE 里没有 zh", "zh=?" not in recorder.sql[0], recorder.sql[0][:90])
 check("补标会 +1 rev（看板才能实时刷新）", "rev=COALESCE(rev, 0) + 1" in recorder.sql[0], recorder.sql[0][:120])
+
+print("[8b] 引用放行：有引用时第 3 盏灯强制绿灯")
+check("has_quote：有链接 → 真", scoring.has_quote({"quoted_url": "https://x.com/a/status/1"}) is True)
+check("has_quote：没引用 → 假",
+      scoring.has_quote({}) is False and scoring.has_quote({"quoted_raw": "只有正文没链接"}) is False)
+check("有引用：AI 判红也变绿灯", tdb._not_comment_flag({"quoted_url": "u"}, False) == 1)
+check("有引用：AI 没判也是绿灯", tdb._not_comment_flag({"quoted_url": "u"}, None) == 1)
+check("无引用：照常听 AI 的",
+      tdb._not_comment_flag({}, False) == 0 and tdb._not_comment_flag({}, True) == 1
+      and tdb._not_comment_flag({}, None) is None)
+check("放行只影响 not_comment，其它灯不看引用",
+      tdb._flag(False) == 0 and tdb._flag(None) is None)
+
+# 落库层面：save_ok 的参数顺序是 zh, quoted_zh, tags, is_news, not_repeat, not_comment, ...
+_ANALYSIS = {"zh": "译文", "quoted_zh": "被引用正文的翻译", "is_news": True, "not_repeat": True,
+             "not_comment": False, "not_sensitive": True, "repeat_of": "", "title": "t",
+             "summary": "s", "importance": "中", "score": 80, "tags": ["领域:发射"]}
+q_save = _Recorder()
+tdb.save_ok(q_save, {"id": 9, "stage": "collected", "quoted_url": "https://x.com/a/status/1"},
+            _ANALYSIS, 1)
+check("save_ok 写了 quoted_zh", "quoted_zh=?" in q_save.sql[0])
+check("save_ok：引用条目 not_comment 落库为 1（AI 判的是 False）",
+      q_save.params[0][5] == 1, f"not_comment={q_save.params[0][5]}")
+check("save_ok：quoted_zh 参数正确", q_save.params[0][1] == "被引用正文的翻译")
+plain_save = _Recorder()
+tdb.save_ok(plain_save, {"id": 10, "stage": "collected"}, _ANALYSIS, 1)
+check("save_ok：无引用时 not_comment 照抄 AI（False → 0）",
+      plain_save.params[0][5] == 0, f"not_comment={plain_save.params[0][5]}")
+
+print("[8c] 引用内容进提示词 + quoted_zh 解析")
+check("无引用时提示词不残留 {quoted}",
+      "{quoted}" not in llm.build_analysis_prompt("x", "a"))
+q_prompt = llm.build_analysis_prompt("我的一句话感想", "elonmusk", None, "NASA", "被引用的正文内容")
+check("提示词带【被引用的推文】与被引用正文",
+      "【被引用的推文】" in q_prompt and "@NASA" in q_prompt and "被引用的正文内容" in q_prompt)
+check("补标提示词同样带引用",
+      "被引用的正文内容" in llm.build_meta_prompt("x", "y", "a", None, "NASA", "被引用的正文内容"))
+parsed_q = llm.parse_analysis('{"zh":"译文","quoted_zh":"被引用的正文翻译","is_news":true}')
+check("解析 quoted_zh", parsed_q["quoted_zh"] == "被引用的正文翻译", parsed_q)
+check("没有 quoted_zh 时给空串", llm.parse_analysis('{"zh":"译文","is_news":true}')["quoted_zh"] == "")
+
 tdb_conn.close()
 import shutil as _shutil  # noqa: E402
 _shutil.rmtree(case, ignore_errors=True)

@@ -163,8 +163,8 @@ _NEWS_RULES = """- "is_news"【第 1 盏灯】：这条本身是不是一条航�
   或者【最近已入库清单】里已经有同一条/同一事件的 → false，
   并在 "repeat_of" 里写出清单里那条的编号（形如 "#56"；不是重复就给空串 ""）。
 - "not_comment"【第 3 盏灯】：true = 它自己就是内容（原发报道、官方发布、独立消息）。
-  如果它是针对**另一条新闻**的评价、吐槽、转发跟评（"这公司又…"、"这事真离谱"、
-  引用别人消息加一句感想）→ false。
+  如果它是针对**另一条新闻**的评价、吐槽、转发跟评（"这公司又…"、"这事真离谱"）→ false。
+  注意：带引用的推文由程序统一放行（见下文【被引用的推文】），你不用为它特意判什么。
 - "not_sensitive"【第 4 盏灯，政治/外交红线】：true = 不涉及敏感政治与外交关系。
   只要沾上下面任何一条就是 false（哪怕它同时也在讲航天）：
   · 国家间的政治/外交冲突：互相谴责、抗议、制裁、断交、军事对峙、领土争端
@@ -198,13 +198,17 @@ ANALYSIS_PROMPT = (
     "只输出一个 JSON 对象：不要 Markdown 代码块，不要任何解释、前后缀或多余文字。\n\n"
     "- \"zh\"：把原文翻译成简体中文。保留 Falcon 9、Starship 等专有名词原文；链接、@、# 原样保留；\n"
     "  不要加\"译文：\"之类的前缀，也不要加引号。\n"
+    "- \"quoted_zh\"：如果给了【被引用的推文】，把**它的正文**也翻译成简体中文放这里\n"
+    "  （和 zh 一样的要求）；没有【被引用的推文】就给空字符串 \"\"。\n"
+    "- 判断时要把【被引用的推文】的内容一起算进去（被引用的那条往往才是新闻本体）。\n"
     + _NEWS_RULES + "\n"
     + _TAG_RULES + "\n"
     "输出格式（严格 JSON）：\n"
-    '{"zh":"译文","is_news":true,"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
+    '{"zh":"译文","quoted_zh":"被引用正文的译文（没有引用就给空串）",'
+    '"is_news":true,"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
     '"title":"星舰第 11 次试飞成功","summary":"SpaceX 完成星舰第 11 次试飞，飞船再入后在海上溅落。",'
     '"importance":"高","score":92,"tags":["领域:发射","对象:星舰","机构:SpaceX"]}\n\n'
-    "{known}{source}原文：\n{raw}"
+    "{known}{source}{quoted}原文：\n{raw}"
 )
 
 # 存量条目补标用：已经有译文了，只补判断 + 四盏灯 + 三件套 + 价值分 + 标签，不重新翻译（也不覆盖人工改过的译文）
@@ -217,16 +221,32 @@ META_PROMPT = (
     '{"is_news":true,"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
     '"title":"星舰第 11 次试飞成功","summary":"……","importance":"高","score":92,'
     '"tags":["领域:发射","对象:星舰"]}\n\n'
-    "{known}{source}原文：\n{raw}\n\n译文：\n{zh}"
+    "{known}{source}{quoted}原文：\n{raw}\n\n译文：\n{zh}"
 )
 
 
 def _fill(template: str, **fields) -> str:
-    """把 {raw} / {zh} / {source} / {known} 这类占位符换成真实内容（不用 format，避免 JSON 花括号被吃掉）。"""
+    """把 {raw} / {zh} / {source} / {known} / {quoted} 这类占位符换成真实内容
+    （不用 format，避免 JSON 花括号被吃掉）。"""
     out = template
     for key, value in fields.items():
         out = out.replace("{" + key + "}", str(value or ""))
     return out
+
+
+def _quoted_block(quoted_account: str, quoted_raw: str) -> str:
+    """引用推文里【被引用的那条】→ 提示词里的一段。
+
+    为什么要有：引用者常常只写一句感想，真正的新闻在被引用的那条上。之前这里的内容
+    完全没进提示词，模型只看到引用者那句话，判定和翻译都会跑偏。
+
+    没有引用（被引用正文为空）时返回空串，`{quoted}` 占位符随之整段消失。
+    """
+    text = str(quoted_raw or "").strip()
+    if not text:
+        return ""
+    who = f"@{quoted_account} " if str(quoted_account or "").strip() else ""
+    return f"【被引用的推文】{who}：\n{text}\n\n"
 
 
 def _source_head(account: str) -> str:
@@ -248,14 +268,20 @@ def _known_block(known_titles) -> str:
             f"{body}\n\n")
 
 
-def build_analysis_prompt(text: str, account: str = "", known_titles=None) -> str:
+def build_analysis_prompt(text: str, account: str = "", known_titles=None,
+                          quoted_account: str = "", quoted_raw: str = "") -> str:
     return _fill(ANALYSIS_PROMPT, known=_known_block(known_titles),
-                 source=_source_head(account), raw=str(text or ""))
+                 source=_source_head(account),
+                 quoted=_quoted_block(quoted_account, quoted_raw),
+                 raw=str(text or ""))
 
 
-def build_meta_prompt(text: str, zh: str = "", account: str = "", known_titles=None) -> str:
+def build_meta_prompt(text: str, zh: str = "", account: str = "", known_titles=None,
+                      quoted_account: str = "", quoted_raw: str = "") -> str:
     return _fill(META_PROMPT, known=_known_block(known_titles),
-                 source=_source_head(account), raw=str(text or ""), zh=str(zh or ""))
+                 source=_source_head(account),
+                 quoted=_quoted_block(quoted_account, quoted_raw),
+                 raw=str(text or ""), zh=str(zh or ""))
 
 
 def _find_json_object(text: str) -> dict:
@@ -358,7 +384,7 @@ def _pick(data: dict, *keys):
 
 
 def _meta_fields(data: dict) -> dict:
-    """四盏灯 + 标题/要点/重要度/价值分 + 标签，完整分析和只补标共用。"""
+    """四盏灯 + 标题/要点/重要度/价值分 + 标签（+ 被引用正文的译文），完整分析和只补标共用。"""
     return {
         "is_news": _to_flag(_pick(data, "is_news", "新闻")),
         "not_repeat": _to_flag(_pick(data, "not_repeat", "不重复")),
@@ -370,6 +396,8 @@ def _meta_fields(data: dict) -> dict:
         "importance": _clean_importance(_pick(data, "importance", "重要度")),
         "score": _clean_score(_pick(data, "score", "分数", "价值分")),
         "tags": _clean_tags(_pick(data, "tags", "标签") or []),
+        # 被引用推文正文的译文；没有引用时模型会给空串
+        "quoted_zh": _clean_text(_pick(data, "quoted_zh", "引用译文", "被引用译文")),
     }
 
 
@@ -398,21 +426,31 @@ def parse_meta(output: str) -> dict:
     return meta
 
 
-def analyze_item(text: str, account: str = "", known_titles=None) -> dict:
+def analyze_item(text: str, account: str = "", known_titles=None,
+                 quoted_account: str = "", quoted_raw: str = "") -> dict:
     """一次调用拿齐：译文 + 四盏灯 + 标题/要点/重要度 + 标签。失败向上抛，由调用方记账重试。
 
     known_titles 是"最近已入库清单"（形如 ["#56 标题", ...]），用来判第 2 盏灯（不重复）。
+    quoted_account / quoted_raw 是引用推文里【被引用的那条】，会拼成提示词里的
+    【被引用的推文】一段，并让模型回 quoted_zh。
     """
     if not is_configured():
         raise RuntimeError("模型 API 未配置完整，缺少：" + "、".join(missing_config()))
-    return parse_analysis(chat(build_analysis_prompt(text, account, known_titles), temperature=0.3))
+    prompt = build_analysis_prompt(text, account, known_titles, quoted_account, quoted_raw)
+    return parse_analysis(chat(prompt, temperature=0.3))
 
 
-def analyze_meta(text: str, zh: str = "", account: str = "", known_titles=None) -> dict:
-    """存量条目补标：只判断四盏灯 + 打标，不翻译（也不动已有译文）。失败向上抛。"""
+def analyze_meta(text: str, zh: str = "", account: str = "", known_titles=None,
+                 quoted_account: str = "", quoted_raw: str = "") -> dict:
+    """存量条目补标：只判断四盏灯 + 打标，不翻译（也不动已有译文）。失败向上抛。
+
+    `{quoted}` 一样会拼进去，让灯判得更准；但补标那一遍**不写 quoted_zh**
+    （见 translate_db.save_meta_ok）。
+    """
     if not is_configured():
         raise RuntimeError("模型 API 未配置完整，缺少：" + "、".join(missing_config()))
-    return parse_meta(chat(build_meta_prompt(text, zh, account, known_titles), temperature=0.0))
+    prompt = build_meta_prompt(text, zh, account, known_titles, quoted_account, quoted_raw)
+    return parse_meta(chat(prompt, temperature=0.0))
 
 
 # ---------------------------------------------------------------- 打标 / 兜底（失败吞掉）

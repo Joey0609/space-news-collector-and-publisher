@@ -28,13 +28,16 @@
 ## 快速开始
 1. **填环境变量**：把根目录 `.env.example` 复制为根目录 `.env`，填入 `PROXY_URL`、`MODEL_API_BASE` / `MODEL_NAME` / `MODEL_API_KEY`、`COOKIES_PATH` 等。
 2. **装依赖**（Python 3.12+）：采集需要 `twscrape`、`openai`、`httpx`、`python-dotenv`；看板只依赖 Python 标准库。
-3. **跑完整流程**：`python main_flow.py`（可配根目录 `run_main_flow.bat/.ps1/.vbs` 每 10 分钟执行）。
-4. **单独跑采集**：`python collect/news_fetch.py`；处理：`python process/translate_db.py`（翻译 + 是否新闻 + 标题/要点/重要度 + 标签，并自动给老条目补标）、`python process/judge.py`、`python process/ai_fallback.py`。
-5. **启动看板**：`python dashboard/server.py`，打开 `http://127.0.0.1:8787`；启动终端会打印管理 token。
-6. **安装插件**：把 `distribute/maibot/hangxiaomai_news/` 放进 MaiBot 的 `plugins/` 目录，并修改 `config.toml` 的 `target_qq` / `target_groups`。
-7. **艾莉森（可选）**：在 `distribute/alison/.env` 填 `APPID` / `SECRET`；先运行 `python distribute/alison/gateway.py` 记录 `group_openid`，再运行 `python distribute/alison/推送.py --once`。
-8. **迁移旧数据**：先 `python tools/migrate_layout.py --dry-run`，确认后 `--apply`。
-9. **改完代码先自检**：`python selftest/run_all.py`。
+3. **启动看板（推荐入口）**：双击根目录 `run_dashboard.bat`（或 `powershell -File run_dashboard.ps1`）——
+   它会启动 `dashboard/server.py`、等端口起来、**自动打开 `http://127.0.0.1:8787`**；服务已在跑时只开页面。
+   `run_dashboard.vbs` 是同一件事的静默版（可放启动项/计划任务）。采集与处理服务在看板页面上按「启动」即可。
+   也可以手动跑：`python dashboard/server.py`。
+4. **单独跑流程**：`python main_flow.py`（一轮采集→翻译→判定→兜底）；采集 `python collect/news_fetch.py`；
+   处理 `python process/translate_db.py`（翻译 + 四盏灯 + AI 分 + 标签/要点，并自动补老条目）、`python process/judge.py`、`python process/ai_fallback.py`。
+5. **安装插件**：把 `distribute/maibot/hangxiaomai_news/` 放进 MaiBot 的 `plugins/` 目录，并修改 `config.toml` 的 `target_qq` / `target_groups`。
+6. **艾莉森（可选）**：在 `distribute/alison/.env` 填 `APPID` / `SECRET`；先运行 `python distribute/alison/gateway.py` 记录 `group_openid`，再运行 `python distribute/alison/推送.py --once`。
+7. **迁移旧数据**：先 `python tools/migrate_layout.py --dry-run`，确认后 `--apply`；给数据库瘦身用 `python tools/drop_columns.py --dry-run`。
+8. **改完代码先自检**：`python selftest/run_all.py`。
 
 ## 安全说明
 - 所有密钥、账号、Cookie 都从 `.env` 读取，**不入库**（见 `.gitignore`）。

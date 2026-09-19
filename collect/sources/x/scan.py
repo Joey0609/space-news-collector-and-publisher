@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Callable
 
 from collect.env import MAX_CONSECUTIVE_FAIL, PAUSE_SECONDS, SCAN_BATCH  # noqa: F401
+from collect.logging_util import one_line
 from .images import download_image
 from collect.db import upsert_raw
 from collect.store import load_baseline, load_cursor, save_baseline, save_cursor
@@ -116,16 +117,47 @@ def _build_new_item(name: str, latest, ts: int, baseline: dict,
         log(f"[跳视频] @{name} 更新 {latest.id} 为引用视频，仅更新基线")
         return None
 
+    # ---- 引用（quote）：被引用推文的内容随条目一起存 ----
+    # 为什么要存：被引用那条往往才是"新闻本体"（引用者只加一句感想），
+    # 之前这些信息全被丢掉，模型只看到引用者那句话。
+    # 存了之后：① 进 AI 提示词参与判定 ② 翻译阶段产出 quoted_zh
+    # ③ 有引用的条目第 3 盏灯（not_comment）会被强制判绿，见 process/translate_db.py。
+    quoted_account = quoted_raw = quoted_url = ""
+    if qt is not None:
+        quoted_author = getattr(qt, "author", None)
+        quoted_account = str(getattr(quoted_author, "username", "") or "")
+        quoted_raw = str(getattr(qt, "rawContent", "") or "")
+        quoted_id = getattr(qt, "id", "")
+        if quoted_id:
+            quoted_url = f"https://x.com/{quoted_account or 'i'}/status/{quoted_id}"
+        # 不截断：整段被引用正文都进日志（one_line 只把换行压平，保证一条记录一行）
+        log(f"[引用] @{name} 更新 {latest.id} 引用了 @{quoted_account}：{one_line(quoted_raw)}")
+
     raw = eff.rawContent if hasattr(eff, "rawContent") else ""
     if not raw:
-        log(f"[新增] @{name} 更新但无文本内容，仅更新基线")
+        if qt is not None:
+            log(f"[新增] @{name} 更新但自身无文本（引用了 @{quoted_account}，"
+                f"被引用正文 {len(quoted_raw)} 字），仅更新基线")
+        else:
+            log(f"[新增] @{name} 更新但无文本内容，仅更新基线")
         return None
 
+    # 图片：先下引用者自己的图，再下被引用推文的图（接在后面、合并进同一个列表），
+    # 这样分发端和看板都不用改就能用上引用图。
+    day = str(latest.date)[:10].replace("-", "") if getattr(latest, "date", None) else ""
     images = []
     for i, mu in enumerate(get_media_urls(eff)):
-        p = download_image(latest.id, mu, i, log, day=(str(latest.date)[:10].replace("-", "") if getattr(latest, "date", None) else ""))
+        p = download_image(latest.id, mu, i, log, day=day)
         if p:
             images.append(p)
+    quoted_media = get_media_urls(qt) if qt is not None else []
+    if quoted_media:
+        log(f"[引用图] @{name} 更新 {latest.id} 被引用推文带 {len(quoted_media)} 张图，一并下载")
+    for j, mu in enumerate(quoted_media):
+        p = download_image(latest.id, mu, len(images) + j, log, day=day)
+        if p:
+            images.append(p)
+
     orig_account = ""
     forward_comment = ""
     if is_rt:
@@ -139,15 +171,16 @@ def _build_new_item(name: str, latest, ts: int, baseline: dict,
         "account": name,
         "orig_account": orig_account,
         "forward_comment": forward_comment,
+        "quoted_account": quoted_account,
+        "quoted_raw": quoted_raw,
+        "quoted_zh": "",
+        "quoted_url": quoted_url,
         "tweet_id": latest.id,
         "ts": ts,
         "date": str(latest.date) if latest.date else "",
-        "published_ts": ts,
-        "published_date": str(latest.date) if latest.date else "",
         "content_type": content_type,
         "raw": raw,
         "zh": "",
-        "url": f"https://x.com/{name}/status/{latest.id}",
         "ori_url": f"https://x.com/{name}/status/{latest.id}",
         "images": images,
         "collected_at": datetime.now().isoformat(timespec="seconds"),

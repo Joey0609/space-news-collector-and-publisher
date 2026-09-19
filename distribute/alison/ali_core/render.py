@@ -48,8 +48,23 @@ def build_source_line(item: dict) -> str:
     return "来源：" + " · ".join(parts)
 
 
+def quoted_text(item: dict) -> str:
+    """引用推文里【被引用的那条】的展示块；没有引用返回空串。
+
+    优先用被引用正文的译文（translated 阶段产出的 items.quoted_zh），
+    模型没给译文时退回原文。
+    """
+    raw = str(item.get("quoted_raw") or "").strip()
+    zh = str(item.get("quoted_zh") or "").strip()
+    if not raw and not zh:
+        return ""
+    who = str(item.get("quoted_account") or "").strip()
+    body = zh or raw
+    return (f"【引用 @{who}】\n{body}" if who else f"【引用】\n{body}")
+
+
 def build_text(item: dict) -> str:
-    """完整正文：来源行 + 译文 + （转推的）转发者评论。"""
+    """完整正文：来源行 + 译文 + （转推的）转发者评论 + （引用的）被引用内容。"""
     src = build_source_line(item)
     body = str(item.get("zh") or item.get("raw") or "").strip()
     text = (src + "\n\n" + body) if src else body
@@ -57,6 +72,9 @@ def build_text(item: dict) -> str:
     if fc:
         fa = str(item.get("account", "") or "")
         text += "\n\n" + (f"转发@{fa}：" + fc if fa else "转发者：" + fc)
+    qt = quoted_text(item)
+    if qt:
+        text += "\n\n" + qt
     return text
 
 

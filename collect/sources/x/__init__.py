@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """X/Twitter source adapter package."""
-from .adapter import XAdapter
+from .adapter import ADAPTER, XAdapter
 
 SOURCE = "x"
-ADAPTER = XAdapter()
+
+__all__ = ["ADAPTER", "XAdapter", "SOURCE"]

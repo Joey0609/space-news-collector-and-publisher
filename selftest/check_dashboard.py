@@ -134,8 +134,26 @@ def test_pagination_and_changes():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_launchers():
+    """根目录启动器：必须存在、ps1 必须带 BOM（无 BOM 时 PS 5.1 按 GBK 读，中文会变乱码并报语法错）。"""
+    root = Path(__file__).resolve().parents[1]
+    ps1 = root / "run_dashboard.ps1"
+    bat = root / "run_dashboard.bat"
+    vbs = root / "run_dashboard.vbs"
+    for path in (ps1, bat, vbs):
+        assert path.is_file(), f"缺少启动器 {path.name}"
+    raw = ps1.read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf", "run_dashboard.ps1 必须存成 UTF-8 带 BOM（Windows PowerShell 5.1 要求）"
+    text = raw.decode("utf-8-sig")
+    assert "dashboard\\server.py" in text, "启动器没有指向 dashboard\\server.py"
+    assert "Start-Process $url" in text, "启动器没有自动打开网址"
+    for old in ("run_main_flow.bat", "run_main_flow.ps1", "run_main_flow.vbs"):
+        assert not (root / old).exists(), f"旧的 {old} 应该已经删掉"
+
+
 if __name__ == "__main__":
     test_service_labels()
     test_stop_kills_whole_tree()
     test_pagination_and_changes()
-    print("dashboard output forwarding + 停止服务杀整棵树 + 分页/增量推送: OK")
+    test_launchers()
+    print("dashboard output forwarding + 停止服务杀整棵树 + 分页/增量推送 + 启动器: OK")

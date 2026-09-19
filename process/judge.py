@@ -37,6 +37,7 @@ from ai import semantic_labels as _ai_semantic_labels
 from rules import (
     ai_tags as _ai_tags,
     decide,
+    has_quote as _has_quote,
     hit_exclude as _hit_exclude,
     importance_label as _importance_label,
     in_allowlist as _in_allowlist,
@@ -111,6 +112,10 @@ async def main():
         if ai_score is not None:
             reason = (reason + f",AI分:{ai_score}" if reason else f"AI分:{ai_score}")
         state, detail = _light_state(n)
+        # 带引用的条目：第 3 盏灯（非评价）在 translate_db 写库时已被强制放过，
+        # 这里再往 reason 里标一句，看板详情页能直接看到"这条为什么放行"。
+        if _has_quote(n):
+            reason = (reason + ",引用放行" if reason else "引用放行")
         if _hit_exclude(n, labels, pref):
             decision = "丢"
             reason = (reason + ",排除命中" if reason else "排除命中")
@@ -147,7 +152,9 @@ async def main():
     if news_file == "数据库":
         conn=open_db()
         for item in judged:
-            conn.execute("UPDATE items SET labels=?,score=?,rules_score=?,decision=?,reason=?,stage='judged',processed_at=?,rev=COALESCE(rev,0)+1 WHERE id=?",(json.dumps(item.get('labels',[]),ensure_ascii=False),item.get('score'),item.get('rules_score'),item.get('decision'),item.get('reason'),datetime.now().isoformat(timespec='seconds'),item.get('id')))
+            # 只写值得长期保存的：分数落在 ai_score/rules_score，标签落在 ai_tags+importance，
+            # 所以这里不再写 score / labels（它们都能由上面几列算出来）。
+            conn.execute("UPDATE items SET rules_score=?,decision=?,reason=?,stage='judged',processed_at=?,rev=COALESCE(rev,0)+1 WHERE id=?",(item.get('rules_score'),item.get('decision'),item.get('reason'),datetime.now().isoformat(timespec='seconds'),item.get('id')))
         conn.commit(); conn.close()
     else:
         WORK_DIR.mkdir(parents=True, exist_ok=True)

@@ -60,6 +60,7 @@ from config import (  # noqa: E402
 from process.db import open_db  # noqa: E402
 from process.logging_util import make_log, one_line, setup_console_encoding  # noqa: E402
 from process.paths import LOG_DIR  # noqa: E402
+from rules import has_quote  # noqa: E402  （"有引用"判定，见 _not_comment_flag）
 
 log = make_log(LOG_DIR / "translate.log")
 
@@ -67,7 +68,7 @@ log = make_log(LOG_DIR / "translate.log")
 PLACEHOLDER = "[未配置 key]"
 
 PENDING_SQL = """
-    SELECT id, account, raw, stage,
+    SELECT id, account, raw, stage, quoted_account, quoted_raw,
            COALESCE(translate_attempts, 0) AS attempts
       FROM items
      WHERE raw IS NOT NULL AND TRIM(raw) <> ''
@@ -93,7 +94,7 @@ _META_NEEDED = ("(COALESCE(is_news, -1) = -1 OR COALESCE(not_repeat, -1) = -1 "
                 "OR TRIM(COALESCE(ai_tags, '')) = '')")
 
 META_PENDING_SQL = f"""
-    SELECT id, account, raw, zh,
+    SELECT id, account, raw, zh, quoted_account, quoted_raw,
            COALESCE(meta_attempts, 0) AS attempts
       FROM items
      WHERE raw IS NOT NULL AND TRIM(raw) <> ''
@@ -173,6 +174,27 @@ def _flag(value):
     return None if value is None else (1 if value else 0)
 
 
+def _not_comment_flag(item: dict, ai_value):
+    """第 3 盏灯（非评价 / not_comment）写库前的最终取值。
+
+    ★★ 有引用的条目一律放行：不管 AI 判成什么，这里都强制给绿灯（1）。★★
+
+    理由：带引用（quote）的推文，内容本体往往在被引用的那条上（quoted_raw 已随条目
+    一起入库并进了提示词），引用者那句话只是个引子。AI 很容易把这种"引用+一句感想"
+    判成「针对另一条新闻的评价」，从而让整条被丢掉。所以这里统一放行。
+
+    注意：只放行这一盏灯 —— 「是不是新闻 / 有没有重复 / 敏不敏感」仍然照常由 AI 判。
+    """
+    if has_quote(item):
+        return 1
+    return _flag(ai_value)
+
+
+def _quoted_zh(analysis: dict) -> str:
+    """被引用正文的译文（没有引用时模型会给空串）。"""
+    return str(analysis.get("quoted_zh") or "").strip()
+
+
 def _tags_json(analysis: dict) -> str:
     return json.dumps(analysis.get("tags") or [], ensure_ascii=False)
 
@@ -194,22 +216,24 @@ def known_titles(conn, exclude_id, limit: int = 0) -> list:
 
 
 def save_ok(conn, item: dict, analysis: dict, attempts: int) -> None:
-    """完整分析成功：写译文 + 四盏灯 + 标题/要点/重要度 + 标签。"""
+    """完整分析成功：写译文 + 四盏灯 + 标题/要点/重要度 + 标签 + 被引用正文的译文。"""
     # 只在还停在 collected 时推进 stage；后续阶段只补字段，避免被重复判定
     stage = item["stage"] or "collected"
     new_stage = "translated" if stage == "collected" else stage
     stamp = now()
     conn.execute(
-        "UPDATE items SET zh=?, ai_tags=?, is_news=?, not_repeat=?, not_comment=?, not_sensitive=?, "
+        "UPDATE items SET zh=?, quoted_zh=?, ai_tags=?, is_news=?, not_repeat=?, not_comment=?, not_sensitive=?, "
         "repeat_of=?, ai_title=?, ai_summary=?, importance=?, ai_score=?, "
         "stage=?, translate_error='', translate_attempts=?, translated_at=?, processed_at=?, "
         "rev=COALESCE(rev, 0) + 1 WHERE id=?",
         (
             analysis["zh"],
+            _quoted_zh(analysis),
             _tags_json(analysis),
             _news_flag(analysis),
             _flag(analysis.get("not_repeat")),
-            _flag(analysis.get("not_comment")),
+            # 有用引用的条目这里会被强制成 1（绿灯），见 _not_comment_flag 的注释
+            _not_comment_flag(item, analysis.get("not_comment")),
             _flag(analysis.get("not_sensitive")),
             analysis.get("repeat_of") or "",
             analysis.get("title") or "",
@@ -226,7 +250,7 @@ def save_ok(conn, item: dict, analysis: dict, attempts: int) -> None:
 
 
 def save_meta_ok(conn, item: dict, meta: dict, attempts: int) -> None:
-    """补标成功：只动四盏灯和标签这几列；zh / stage 一律不碰。"""
+    """补标成功：只动四盏灯和标签这几列；zh / stage / quoted_zh 一律不碰。"""
     conn.execute(
         "UPDATE items SET ai_tags=?, is_news=?, not_repeat=?, not_comment=?, not_sensitive=?, "
         "repeat_of=?, ai_title=?, ai_summary=?, importance=?, ai_score=?, "
@@ -235,7 +259,8 @@ def save_meta_ok(conn, item: dict, meta: dict, attempts: int) -> None:
             _tags_json(meta),
             _news_flag(meta),
             _flag(meta.get("not_repeat")),
-            _flag(meta.get("not_comment")),
+            # 同 save_ok：有引用的条目第 3 盏灯强制绿灯
+            _not_comment_flag(item, meta.get("not_comment")),
             _flag(meta.get("not_sensitive")),
             meta.get("repeat_of") or "",
             meta.get("title") or "",
@@ -300,14 +325,18 @@ def run_with_retry(call, tag: str):
     return None, RuntimeError("重试次数用尽"), False
 
 
-def analyze_with_retry(text: str, tag: str, account: str = "", known=None):
-    """完整分析（翻译 + 三盏灯 + 标题/要点/重要度 + 标签）。"""
-    return run_with_retry(lambda: analyze_item(text, account, known), tag)
+def analyze_with_retry(text: str, tag: str, account: str = "", known=None,
+                       quoted_account: str = "", quoted_raw: str = ""):
+    """完整分析（翻译 + 四盏灯 + 标题/要点/重要度 + 标签 + 被引用正文译文）。"""
+    return run_with_retry(
+        lambda: analyze_item(text, account, known, quoted_account, quoted_raw), tag)
 
 
-def analyze_meta_with_retry(text: str, zh: str, tag: str, account: str = "", known=None):
+def analyze_meta_with_retry(text: str, zh: str, tag: str, account: str = "", known=None,
+                            quoted_account: str = "", quoted_raw: str = ""):
     """存量补标（只点灯 + 打标，不翻译）。"""
-    return run_with_retry(lambda: analyze_meta(text, zh, account, known), tag)
+    return run_with_retry(
+        lambda: analyze_meta(text, zh, account, known, quoted_account, quoted_raw), tag)
 
 
 def translate_pass(conn) -> tuple[int, int, int, bool]:
@@ -329,7 +358,8 @@ def translate_pass(conn) -> tuple[int, int, int, bool]:
 
         analysis, error, auth_failed = analyze_with_retry(
             str(item["raw"]), tag, str(item.get("account") or ""),
-            known_titles(conn, item["id"], AI_REPEAT_CONTEXT))
+            known_titles(conn, item["id"], AI_REPEAT_CONTEXT),
+            str(item.get("quoted_account") or ""), str(item.get("quoted_raw") or ""))
 
         if auth_failed:
             # key 不对是配置问题：整轮停下，绝不把 71 条的重试次数一次烧光
@@ -342,6 +372,14 @@ def translate_pass(conn) -> tuple[int, int, int, bool]:
             ok += 1
             log(f"[翻译OK {tag}] @{item['account']} 第{attempts}次 | {describe(analysis)} "
                 f"| {one_line(analysis['zh'])}")
+            # 有引用的条目：第 3 盏灯被强制放过，日志里标注一下（存的是绿，AI 可能判的是红）
+            if has_quote(item) and analysis.get("not_comment") is not True:
+                log(f"[引用放行] {tag} @{item['account']} 有引用，第 3 盏灯（非评价）强制绿灯"
+                    f"（AI 原判 {analysis.get('not_comment')}）")
+            quoted_zh = _quoted_zh(analysis)
+            if quoted_zh:
+                log(f"[引用OK {tag}] @{item['account']} 引用 @{item.get('quoted_account') or '?'} "
+                    f"的译文 | {one_line(quoted_zh)}")
         elif is_transient(error):
             # 限流/超时：记下原因但不消耗次数，下一轮继续
             save_transient(conn, item, error)
@@ -379,7 +417,8 @@ def meta_pass(conn) -> tuple[int, int, int, bool]:
 
         meta, error, auth_failed = analyze_meta_with_retry(
             str(item["raw"]), str(item["zh"]), tag, str(item.get("account") or ""),
-            known_titles(conn, item["id"], AI_REPEAT_CONTEXT))
+            known_titles(conn, item["id"], AI_REPEAT_CONTEXT),
+            str(item.get("quoted_account") or ""), str(item.get("quoted_raw") or ""))
 
         if auth_failed:
             log(f"[中止] 认证失败 HTTP {status_code_of(error)}：请检查 MODEL_API_KEY 是否正确")
@@ -390,6 +429,10 @@ def meta_pass(conn) -> tuple[int, int, int, bool]:
             conn.commit()
             ok += 1
             log(f"[补标OK {tag}] @{item['account']} 第{attempts}次 | {describe(meta)}")
+            # 有引用的条目同样会被强制放过第 3 盏灯，标注一下
+            if has_quote(item) and meta.get("not_comment") is not True:
+                log(f"[引用放行] {tag} @{item['account']} 有引用，第 3 盏灯（非评价）强制绿灯"
+                    f"（AI 原判 {meta.get('not_comment')}）")
         elif is_transient(error):
             save_meta_transient(conn, item, error)
             conn.commit()

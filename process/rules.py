@@ -85,6 +85,18 @@ LIGHT_FIELDS = (
 )
 
 
+def has_quote(item: dict) -> bool:
+    """这条推文是不是"带引用（quote）"。
+
+    以 quoted_url 为准：采集时只要拿到了被引用推文对象就一定写了它，
+    所以「纯图引用」（被引用那条没有文字）也算引用。
+
+    ⚠️ 这个判断被 process/translate_db.py 用来给第 3 盏灯（not_comment）强制放行，
+    改字段名要同步那边。
+    """
+    return bool(str(item.get("quoted_url") or "").strip())
+
+
 def lights(item: dict) -> list:
     """四盏灯：是新闻 / 不重复 / 非评价 / 非敏感政治。每盏 True(绿) / False(红) / None(灰)。"""
     return [news_flag(item.get(field)) for field, _ in LIGHT_FIELDS]

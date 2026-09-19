@@ -23,6 +23,8 @@ COOKIES_PATH = Path(_cookie_path) if _cookie_path else (ROOT / "data" / "state" 
 _watch_account = os.getenv("WATCH_ACCOUNT", "").strip()
 WATCH_ACCOUNT = _watch_account or "Space_Alioth"
 NEWS_ACCOUNTS = [x.strip() for x in os.getenv("NEWS_ACCOUNTS", "").split(",") if x.strip()]
+# 要启用哪些采集源（逗号分隔）；留空 = 跑 collect/sources/ 下所有已注册的源
+ENABLED_SOURCES = [x.strip() for x in os.getenv("SOURCES", "").split(",") if x.strip()]
 
 
 def config_summary() -> dict:
@@ -34,6 +36,7 @@ def config_summary() -> dict:
         "watch_account": WATCH_ACCOUNT,
         "watch_account_from_default": not bool(_watch_account),
         "explicit_accounts": len(NEWS_ACCOUNTS),
+        "enabled_sources": ENABLED_SOURCES or ["(全部已注册的源)"],
     }
 
 # ---- 抓取节奏（防 X 限流；也可用 .env 覆盖后两项）----

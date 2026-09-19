@@ -232,9 +232,12 @@ def _item_rows(where_sql: str, tail_sql: str, params: tuple) -> list[dict]:
                 row["images"] = json.loads(row["images"])
             except Exception:
                 row["images"] = []
-        row["ori_url"] = row.get("ori_url") or row.get("url") or ""
+        row["ori_url"] = row.get("ori_url") or ""
         row["images"] = [str(p) for p in (row.get("images") or []) if str(p).strip()]
         row["_stage"] = row.get("stage", "")
+        # 分数在库里分两列（ai_score / rules_score），给前端一个算好的 score 省得两边各写一份逻辑
+        score = row.get("ai_score")
+        row["score"] = score if score is not None else row.get("rules_score")
     return rows
 
 
@@ -563,7 +566,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 import sqlite3
                 item_id=int(payload.get('id'))
-                allowed={'zh','raw','score','decision','reason','content_type','ori_url'}
+                allowed={'zh','raw','decision','reason','content_type','ori_url'}
                 values={k:payload[k] for k in allowed if k in payload}
                 if not values: raise ValueError('没有可修改字段')
                 db=DATA/'hx.sqlite3'; conn=sqlite3.connect(db)
