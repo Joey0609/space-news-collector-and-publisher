@@ -33,6 +33,7 @@ from config import DEFAULT_TARGET_GROUP, DEFAULT_TARGET_PRIVATE
 from ai import build_fallback_prompt as build_ai_prompt
 from ai import fallback_decide as ai_decide
 from process.db import open_db, rows as db_rows
+from process.jsonio import load_toml
 from process.logging_util import make_log, setup_console_encoding
 from process.paths import CONFIG_DIR, LOG_DIR, WORK_DIR
 
@@ -41,14 +42,6 @@ OUTPUT_DIR = WORK_DIR
 
 LOG_FILE = LOG_DIR / "ai_fallback.log"
 log = make_log(LOG_FILE)
-
-
-def find_latest_judged() -> Path:
-    f = latest_file(OUTPUT_DIR, "judged_*.json")
-    if not f:
-        log("[错误] 找不到 judged_*.json，先运行模块2")
-        sys.exit(1)
-    return f
 
 
 async def main():
@@ -64,8 +57,8 @@ async def main():
     conn = open_db()
     for n in judged:
         verdict = ai_decide(n, user_pref, group_pref, log) if n.get("decision") == "AI兜底" else n.get("decision", "丢")
-        conn.execute("UPDATE items SET final_decision=?, stage='processed' WHERE id=?", (verdict, n.get("id")))
-        log(f"[AI兜底] @{n.get('account','?')} 分{n.get('score')} -> {verdict} | {n.get('zh','')[:40]}")
+        conn.execute("UPDATE items SET final_decision=?, stage='processed', rev=COALESCE(rev,0)+1 WHERE id=?", (verdict, n.get("id")))
+        log(f"[AI兜底] @{n.get('account','?')} 分{n.get('score')} -> {verdict} | {n.get('zh','')}")
     conn.commit()
     conn.close()
     log(f"[结果] 数据库最终处理 {len(judged)} 条")

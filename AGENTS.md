@@ -23,7 +23,7 @@ config/        人维护配置，不入库
 ```powershell
 python main_flow.py
 python collect\news_fetch.py
-python process\translate.py
+python process\translate_db.py
 python process\judge.py
 python process\ai_fallback.py
 python dashboard\server.py
@@ -37,18 +37,19 @@ python tools\migrate_layout.py --dry-run
 
 ```text
 collect/news_fetch.py
-  -> data/raw/new_news_*.json
-  -> process/translate.py
-  -> data/work/translated_*.json
-  -> process/judge.py
-  -> data/work/judged_*.json
-  -> process/ai_fallback.py
-  -> data/work/fallback_*.json
+  -> data/raw/new_news_*.json + data/hx.sqlite3 items(stage=collected)
+  -> process/translate_db.py     缺译文→完整分析；有译文但缺灯/缺分/缺标签→只补判断（不动 zh）。
+                                 产出：zh 译文 / 四盏灯 is_news·not_repeat·not_comment·not_sensitive /
+                                 ai_score AI 价值分(0~100) / ai_title / ai_summary / importance / ai_tags，
+                                 stage=translated
+  -> process/judge.py            四绿→发、任一红→丢（老条目走规则分+阈值），score=AI分/rules_score/decision，stage=judged
+  -> process/ai_fallback.py      final_decision，stage=processed
   -> data/queue/待推送.json
   -> distribute/maibot 或 distribute/alison
 ```
 
 `main_flow.py` 会按上述顺序调用采集、翻译、判定、AI 兜底，并把最终判定为“发”的条目放入队列。
+（`process/translate.py` / `judge.py` 也支持旧的 JSON 入参，但主流程只走 SQLite。）
 
 ## 数据位置
 
@@ -86,8 +87,10 @@ collect/news_fetch.py
 
 ### process
 
-- `translate.py`：原文翻译。
-- `judge.py`：机械标签、AI 语义标签、权重、白名单、排除和阈值。
+- `translate_db.py`：主流程入口，两遍，**缺什么就重做什么**：① 缺译文（zh 空/旧占位符/翻译失败）→ 完整分析（译文 + **四盏灯** `is_news/not_repeat/not_comment/not_sensitive` + **AI 价值分 `ai_score`(0~100)** + 标题/要点/重要度 + 标签）；② 有译文但**缺灯/缺 AI 分/缺标签** → 只补判断（**不重新翻译、不覆盖人工译文**，`--meta-only` 可只跑这遍）。判"不重复"时会带上"最近已入库标题清单"（`AI_REPEAT_CONTEXT` 条，0=关）。失败按"临时/永久/认证"分别记账重试，两遍各有自己的上限（`translate_attempts` / `meta_attempts`）。
+- `translate.py`：保留的 JSON 版翻译入口，逻辑同上，读写 `data/raw` 与 `data/work`。
+- `judge.py`：**四绿直接发、任一红直接丢**（`[gate] "AI分下限" > 0` 时四绿但 AI 分太低也丢；老条目没点灯时回到规则分+阈值+AI兜底）。`items.score` 优先用 AI 分、没分才用 `rules_score`。标签取自 `ai_tags` + `重要:高/中/低`；白名单/排除/阈值照旧。`[gate] 三灯放行 = false` 可退回纯打分。
+- `ai.py`：全部提示词在这里；`tools/dump_prompts.py` 会把真实提示词导出成 `提示词.md`（改完提示词记得重跑它）。
 - `ai_fallback.py`：边缘分数最终判断。
 - `process_core_contract.py`：RawItem 归一化/校验起点。
 
@@ -101,6 +104,18 @@ collect/news_fetch.py
 
 后端：`dashboard/server.py`，标准库 HTTP、JSON API、SSE、token、审计、采集/处理/自检操作。
 前端：`dashboard/webui/`，原生 HTML/CSS/JS，深色界面、响应式布局、队列动画、减少动画模式。
+
+实时与分页（看板要和采集/翻译同步）：
+
+- `items.rev`：每次改这一行就 +1（`collect/db.py` 采集更新、`translate_db.py` 翻译/补标、
+  `judge.py`、`ai_fallback.py`、看板改译文都 +1）。翻译是**就地更新**已有行、id 不变，
+  只看 id 会漏掉"译文/四盏灯刚写好"，所以增量必须靠 rev。
+- SSE（`/api/stream`）每秒推 `latest_id` / `latest_rev`；前端发现游标变大就拉
+  `/api/snapshot?since_id=&since_rev=`，把"新条目 + 被更新过的条目"打补丁上屏（约 1 秒）。
+- 前端每 15 秒（`RECONCILE_MS`）对"最新 ~ 当前显示的这一段"做一次全量核对
+  （`/api/snapshot?offset=0&limit=shown`）：补漏、刷新变了的、删掉服务端已不存在的，防止 SSE 丢事件。
+- 分页：默认 20 条（`PAGE_SIZE`），滚到视口下方还剩 10 条（`LOAD_AHEAD`）自动再加载 20 条
+  （`/api/items?offset=&limit=`）；底部显示"已显示 X / 共 Y"和「加载更多」按钮。
 
 ## 数据库
 

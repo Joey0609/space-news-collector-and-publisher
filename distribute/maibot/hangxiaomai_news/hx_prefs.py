@@ -35,7 +35,8 @@ SETTING_TOKENS = [
 ]
 
 SCHEDULE_KEYS = set(BUILTIN_PUSH_DEFAULTS.keys())          # 推送方式（[push]）
-SCORE_WEIGHT_KEYS = {"发射", "任务", "重大任务", "科普", "历史", "商业", "故障", "带图视频", "重复旧闻"}
+SCORE_WEIGHT_KEYS = {"发射", "任务", "重大任务", "科普", "历史", "商业", "故障", "带图视频", "重复旧闻",
+                     "重要高", "重要中", "重要低"}
 SCORE_THRESHOLD_KEYS = {"高阈值", "低阈值"}
 SCORE_ALLOW_KEYS = {"可发送领域", "可发送账号", "可发送关键词"}
 PREF_LIKE_KEYS = {"喜欢账号", "喜欢领域", "喜欢关键词"}
@@ -58,7 +59,8 @@ async def parse_push_pref(text: str, context: str = "", logger=None) -> dict:
         "输出JSON：{\"action\":\"set\",\"schedule\":{},\"scoring\":{},\"preference\":{}}。\n"
         "- schedule 推送方式：新闻推送(bool)、活跃时段(\"HH:MM-HH:MM\")、间隔最小分钟(int)、间隔最大分钟(int)、"
         "一次发几条(int)、带图(bool)、一天最多发几次(int)\n"
-        "- scoring 评分/可发送内容：高阈值(int)、低阈值(int)、发射/任务/重大任务/科普/历史/商业/故障/带图视频/重复旧闻(int权重)、"
+        "- scoring 评分/可发送内容：高阈值(int)、低阈值(int)、发射/任务/重大任务/科普/历史/商业/故障/带图视频/重复旧闻/"
+        "重要高/重要中/重要低(int权重，重要度是 AI 给这条新闻判的高/中/低)、"
         "可发送领域/可发送账号/可发送关键词(字符串数组，'可以发送的内容=X,y,z'即这些)\n"
         "- preference 内容偏好（任意词列表）：\n"
         "   多发(list)：爱看/喜欢/多给我发 X\n"

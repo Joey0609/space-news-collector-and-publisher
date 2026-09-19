@@ -13,7 +13,7 @@
 说明：
   - 子模块用麦麦 venv 的 pythonw.exe 跑（无控制台黑窗）；找不到就退回当前解释器。
   - 每个子模块独立进程：一个崩了不影响其它模块，日志见 logs/*.log。
-   - 待推送队列与去重规则在 process/queue.py。
+   - 待推送队列与去重规则在 collect/store.py（process/pending_queue.py 是同一份文件格式说明）。
 """
 import json
 import os

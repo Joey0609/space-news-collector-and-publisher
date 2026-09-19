@@ -580,6 +580,185 @@ dialog::backdrop {
     font-weight: 600
 }
 
+.detail-summary {
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.6
+}
+
+/* AI 标题 / 判定 / 重要度 / 标签 小圆片 */
+.item-title {
+    margin-top: 2px;
+    font-weight: 600;
+    font-size: 14px
+}
+
+.chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 9px
+}
+
+.chip {
+    padding: 2px 8px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600
+}
+
+.chip-news {
+    border-color: #b7e2c4;
+    color: #1f7a45
+}
+
+.chip-warn {
+    border-color: #f0c9c9;
+    color: #a33
+}
+
+.chip-importance {
+    border-color: #f2d9a8;
+    color: #8a6100
+}
+
+.chip-score {
+    border-color: #c9d8f5;
+    color: #2b4c8c;
+    font-variant-numeric: tabular-nums
+}
+
+/* 四盏灯：是新闻 / 不重复 / 非评价 / 非敏感政治 */
+.lights {
+    display: inline-flex;
+    gap: 4px;
+    margin-right: 6px;
+    vertical-align: middle
+}
+
+.light {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+    border: 1px solid rgba(0, 0, 0, .18);
+    position: relative
+}
+
+/* 鼠标一放上去立刻出提示（原生 title 要等一秒，所以自己画） */
+.light[data-tip]:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 9px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: #16233a;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    white-space: nowrap;
+    z-index: 40;
+    pointer-events: none;
+    box-shadow: 0 10px 26px rgba(15, 35, 65, .3)
+}
+
+.light[data-tip]:hover::before {
+    content: "";
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: #16233a;
+    z-index: 41;
+    pointer-events: none
+}
+
+/* 第一盏灯的提示往右展开，避免超出卡片左边界 */
+.lights .light:first-child[data-tip]:hover::after {
+    left: 0;
+    transform: none
+}
+
+.lights .light:first-child[data-tip]:hover::before {
+    left: 4px;
+    transform: none
+}
+
+.light-on {
+    background: #2fb45f;
+    box-shadow: 0 0 0 2px rgba(47, 180, 95, .18)
+}
+
+.light-off {
+    background: #e05252;
+    box-shadow: 0 0 0 2px rgba(224, 82, 82, .18)
+}
+
+.light-unknown {
+    background: #cbd5e1
+}
+
+/* 台账筛选按钮 */
+.filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 10px 0 4px
+}
+
+.filters button {
+    padding: 4px 10px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer
+}
+
+.filters button.active {
+    border-color: var(--blue);
+    color: var(--blue);
+    background: #eef4ff
+}
+
+/* 列表底部：已显示 X / 共 Y + 加载更多 */
+.list-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 14px 2px 4px;
+    border-top: 1px solid var(--line);
+    margin-top: 14px
+}
+
+.list-status {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600
+}
+
+.list-foot button {
+    padding: 6px 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer
+}
+
 .detail-scroll {
     flex: 1 1 auto;
     min-height: 0;
@@ -742,9 +921,10 @@ dialog::backdrop {
     min-width: 0
 }
 
-.config-field label {
+/* 字段名 + ⓘ 图标这一行：普通容器，不是 <label>（label 会把点击转发给图标） */
+.config-field .field-head {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 7px;
     margin: 0 0 7px;
     color: #31415c;
@@ -752,7 +932,7 @@ dialog::backdrop {
     font-weight: 720
 }
 
-.config-field label small {
+.config-field .field-head small {
     display: block;
     min-height: 0;
     margin: 0;
@@ -762,7 +942,77 @@ dialog::backdrop {
     line-height: 1.45
 }
 
-.config-field input {
+.field-name {
+    overflow-wrap: anywhere
+}
+
+/* 配置项说明图标：点它才展开说明 */
+.hint-toggle {
+    flex: 0 0 auto;
+    width: 17px;
+    height: 17px;
+    padding: 0;
+    border: 1px solid #b9c8e0;
+    border-radius: 50%;
+    background: #fff;
+    color: #5b7091;
+    font-size: 11px;
+    font-weight: 700;
+    font-style: italic;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background .15s ease, border-color .15s ease, color .15s ease
+}
+
+.hint-toggle:hover,
+.hint-toggle:focus-visible {
+    border-color: var(--blue);
+    background: #eef4ff;
+    color: var(--blue)
+}
+
+.hint-toggle:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 1px
+}
+
+/* 说明浮层：挂在配置 dialog 内部（top layer 之下不会被 dialog 盖住），fixed 定位不出屏 */
+.float-tip {
+    position: fixed;
+    z-index: 90;
+    max-width: min(340px, calc(100vw - 32px));
+    padding: 8px 11px;
+    border-radius: 9px;
+    background: #16233a;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.55;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    pointer-events: none;
+    box-shadow: 0 14px 34px rgba(15, 35, 65, .34);
+    animation: tip-in .1s ease-out
+}
+
+@keyframes tip-in {
+    from {
+        opacity: 0;
+        transform: translateY(-2px)
+    }
+
+    to {
+        opacity: 1;
+        transform: none
+    }
+}
+
+.config-field input,
+.config-field select {
     display: block;
     width: 100%;
     height: 42px;
@@ -776,7 +1026,17 @@ dialog::backdrop {
     transition: border-color .18s ease, box-shadow .18s ease
 }
 
+.config-field select {
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23718096' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+    padding-right: 36px
+}
+
 .config-field input:focus,
+.config-field select:focus,
 .cookie-textarea:focus {
     outline: 0;
     border-color: #4d7eea;

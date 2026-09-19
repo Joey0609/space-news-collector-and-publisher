@@ -5,7 +5,11 @@ from pathlib import Path
 from collect.paths import DB_FILE
 
 def open_db():
- c=sqlite3.connect(DB_FILE,timeout=10); c.row_factory=sqlite3.Row; c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA busy_timeout=10000'); return c
+ c=sqlite3.connect(DB_FILE,timeout=10); c.row_factory=sqlite3.Row; c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA busy_timeout=10000')
+ # 处理服务可能先于采集启动；这里也补一次表和列，避免 translate_* 列不存在。
+ from collect.db import ensure_schema
+ ensure_schema(c)
+ return c
 
 def rows(stage=None):
  c=open_db(); q='SELECT * FROM items'; args=()

@@ -54,7 +54,18 @@
                         <h2>全部收集内容</h2>
                     </div><span id="count" class="count">0</span>
                 </div>
+                <div class="filters" role="group" aria-label="台账筛选">
+                    <button data-filter="all" class="active">全部</button>
+                    <button data-filter="green">全绿放行</button>
+                    <button data-filter="red">红灯拦截</button>
+                    <button data-filter="unknown">未点灯</button>
+                    <button data-filter="send">判定=发</button>
+                </div>
                 <div id="items"></div>
+                <div class="list-foot">
+                    <span id="list-status" class="list-status">已显示 0 / 共 0 条</span>
+                    <button id="load-more" class="secondary" hidden>加载更多</button>
+                </div>
             </section>
             <aside class="panel summary"><span class="eyebrow">OVERVIEW</span>
                 <h2>运行摘要</h2>
@@ -69,6 +80,7 @@
                 <span class="eyebrow">CONTENT DETAIL</span>
                 <h2 id="detail-title">内容详情</h2>
                 <div class="detail-meta" id="detail-meta"></div>
+                <div class="detail-summary" id="detail-summary" hidden></div>
             </div>
             <button id="detail-close" class="close" aria-label="关闭">×</button>
         </header>

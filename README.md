@@ -26,10 +26,10 @@
 | `项目指南.md` | 项目需求与历史文档 |
 
 ## 快速开始
-1. **填环境变量**：把根目录 `.env.example` 复制为根目录 `.env`，填入 `PROXY_URL`、`DEEPSEEK_KEY`、`COOKIES_PATH` 等。
+1. **填环境变量**：把根目录 `.env.example` 复制为根目录 `.env`，填入 `PROXY_URL`、`MODEL_API_BASE` / `MODEL_NAME` / `MODEL_API_KEY`、`COOKIES_PATH` 等。
 2. **装依赖**（Python 3.12+）：采集需要 `twscrape`、`openai`、`httpx`、`python-dotenv`；看板只依赖 Python 标准库。
 3. **跑完整流程**：`python main_flow.py`（可配根目录 `run_main_flow.bat/.ps1/.vbs` 每 10 分钟执行）。
-4. **单独跑采集**：`python collect/news_fetch.py`；处理：`python process/translate.py`、`python process/judge.py`、`python process/ai_fallback.py`。
+4. **单独跑采集**：`python collect/news_fetch.py`；处理：`python process/translate_db.py`（翻译 + 是否新闻 + 标题/要点/重要度 + 标签，并自动给老条目补标）、`python process/judge.py`、`python process/ai_fallback.py`。
 5. **启动看板**：`python dashboard/server.py`，打开 `http://127.0.0.1:8787`；启动终端会打印管理 token。
 6. **安装插件**：把 `distribute/maibot/hangxiaomai_news/` 放进 MaiBot 的 `plugins/` 目录，并修改 `config.toml` 的 `target_qq` / `target_groups`。
 7. **艾莉森（可选）**：在 `distribute/alison/.env` 填 `APPID` / `SECRET`；先运行 `python distribute/alison/gateway.py` 记录 `group_openid`，再运行 `python distribute/alison/推送.py --once`。

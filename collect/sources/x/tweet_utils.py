@@ -73,5 +73,5 @@ def extract_forward_comment(latest, eff) -> str:
         return ""  # 只是转发原文，无评论
     if orig and orig in s:
         pre = s.split(orig, 1)[0].strip()  # 原帖文本之前的部分=转发者的话
-        return pre[:200] if pre else ""
-    return s[:200]
+        return pre
+    return s

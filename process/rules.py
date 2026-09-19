@@ -8,6 +8,8 @@
     分数 <= 低阈值   -> 丢
     中间             -> AI兜底（交给模块3）
 """
+import json
+
 # 标签类别 → 参与打分的关键词（AI 语义标签与关键词兜底共用）
 CAT_KEYWORDS = {
     "发射": ["发射"],
@@ -32,6 +34,97 @@ def item_images(item: dict) -> list:
         return [str(x) for x in images if str(x).strip()]
     old = str(item.get("image", "") or "")
     return [old] if old else []
+
+
+def ai_tags(item: dict) -> list:
+    """取翻译阶段存下的 AI 标签（items.ai_tags 是 JSON 数组，也接受已经是 list 的情况）。"""
+    raw = item.get("ai_tags")
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(x).strip() for x in data if str(x).strip()]
+
+
+def news_flag(value):
+    """把 is_news 归一成 True / False / None（None = 未知，不拦）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "是", "新闻"):
+            return True
+        if text in ("0", "false", "no", "否", "不是", "非新闻"):
+            return False
+    return None
+
+
+def is_non_news(item: dict) -> bool:
+    """模型明确判为"不是新闻"（闲聊/广告/无实质信息）→ 该条直接丢。
+
+    未知（None，例如老条目或模型没返回）一律不拦，交给后面的打分与白名单。
+    """
+    return news_flag(item.get("is_news")) is False
+
+
+# 四盏灯：(items 列, 红灯时的说法)
+LIGHT_FIELDS = (
+    ("is_news", "非新闻"),
+    ("not_repeat", "重复"),
+    ("not_comment", "只是评价"),
+    ("not_sensitive", "敏感政治/外交"),
+)
+
+
+def lights(item: dict) -> list:
+    """四盏灯：是新闻 / 不重复 / 非评价 / 非敏感政治。每盏 True(绿) / False(红) / None(灰)。"""
+    return [news_flag(item.get(field)) for field, _ in LIGHT_FIELDS]
+
+
+def light_state(item: dict) -> tuple:
+    """返回 ("green"|"red"|"unknown", 说明)。
+
+    任一红 → ("red", "重复、只是评价" 这种说明)；四盏全绿 → ("green", "")；有灰没红 → ("unknown", "")。
+    """
+    states = lights(item)
+    reds = [label for value, (_, label) in zip(states, LIGHT_FIELDS) if value is False]
+    if reds:
+        return "red", "、".join(reds)
+    if all(value is True for value in states):
+        return "green", ""
+    return "unknown", ""
+
+
+def importance_label(item: dict) -> str:
+    """AI 重要度 → 标签 "重要:高|中|低"；没判出来给空串（不参与打分）。"""
+    value = str(item.get("importance") or "").strip()
+    return f"重要:{value}" if value in ("高", "中", "低") else ""
+
+
+def score_floor_ok(ai_score, floor) -> bool:
+    """AI 价值分下限门控（[gate] AI分下限）：
+
+    floor <= 0（默认）→ 不看分，一律通过；模型没给分也不拦；否则要求 ai_score >= floor。
+    """
+    try:
+        floor = int(floor or 0)
+    except (TypeError, ValueError):
+        floor = 0
+    if floor <= 0 or ai_score is None:
+        return True
+    try:
+        return int(ai_score) >= floor
+    except (TypeError, ValueError):
+        return True
 
 
 def mechanical_labels(item: dict) -> list:
@@ -65,6 +158,16 @@ def score_with_rules(labels: list, item: dict, rules: dict, pref: dict) -> tuple
         val = weight.get("带图视频", 0)
         score += val
         reasons.append(f"带图:{val:+d}")
+
+    # 2b) AI 重要度加分（可选）：只有 [weights] 里配了 "重要高"/"重要中"/"重要低" 才生效，
+    #     没配就是 0，不改变原有打分行为。
+    importance = str(item.get("importance") or "").strip()
+    if importance in ("高", "中", "低"):
+        key = f"重要{importance}"
+        val = weight.get(key, 0)
+        if val:
+            score += val
+            reasons.append(f"{key}:{val:+d}")
 
     # 3) 关键词兜底（若AI没给语义标签，用关键词粗判领域）
     if not any("领域:" in l for l in labels):

@@ -27,10 +27,28 @@ PROCESSES: dict[str, subprocess.Popen] = {}
 SERVICE_NAMES = {"collect": "采集", "process": "处理", "distribute": "分发"}
 CONFIG_FIELDS = {
     "collect": ["PROXY_URL", "COOKIES_PATH", "WATCH_ACCOUNT", "NEWS_ACCOUNTS", "SCAN_BATCH", "PAUSE_SECONDS", "COLLECT_INTERVAL_SECONDS"],
-    "process": ["DEEPSEEK_KEY", "PROCESS_INTERVAL_SECONDS"],
+    "process": ["MODEL_PROTOCOL", "MODEL_API_BASE", "MODEL_NAME", "MODEL_API_KEY", "MODEL_TIMEOUT", "MODEL_MAX_TOKENS", "AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES", "TRANSLATE_RATE_LIMIT_WAIT", "TRANSLATE_PAUSE_SECONDS", "PROCESS_INTERVAL_SECONDS"],
     "distribute": ["DISTRIBUTE_CHANNEL"],
 }
-SECRET_FIELDS = {"DEEPSEEK_KEY"}
+SECRET_FIELDS = {"MODEL_API_KEY"}
+# 单选字段：看板前端会渲染成下拉框（只允许这三种协议）
+CHOICE_FIELDS = {
+    "MODEL_PROTOCOL": ["openai", "responses", "anthropic"],
+}
+# 未配置时在表单里显示的默认值（避免用户面对空白不知道填什么）
+# 注意：模型地址/名称没有默认服务商，留空就是"必须自己填"。
+FIELD_DEFAULTS = {
+    "MODEL_PROTOCOL": "openai",
+    "MODEL_API_BASE": "",
+    "MODEL_NAME": "",
+    "MODEL_TIMEOUT": "90",
+    "MODEL_MAX_TOKENS": "0",
+    "AI_REPEAT_CONTEXT": "40",
+    "TRANSLATE_MAX_ATTEMPTS": "3",
+    "TRANSLATE_INLINE_RETRIES": "2",
+    "TRANSLATE_RATE_LIMIT_WAIT": "20",
+    "TRANSLATE_PAUSE_SECONDS": "0.5",
+}
 
 
 
@@ -125,8 +143,14 @@ def service_config(name: str) -> dict:
     values = env_values()
     fields = []
     for key in CONFIG_FIELDS[name]:
-        value = values.get(key, "")
-        fields.append({"key": key, "value": value, "secret": key in SECRET_FIELDS})
+        value = values.get(key, "") or FIELD_DEFAULTS.get(key, "")
+        fields.append({
+            "key": key,
+            "value": value,
+            "secret": key in SECRET_FIELDS,
+            # 非空表示这是单选字段，前端渲染成下拉框
+            "choices": CHOICE_FIELDS.get(key, []),
+        })
     result = {"service": name, "fields": fields}
     if name == "collect":
         result["cookie_text"] = COOKIE_FILE.read_text(encoding="utf-8") if COOKIE_FILE.exists() else ""
@@ -165,11 +189,28 @@ def save_service_config(name: str, updates: dict) -> None:
     path.write_text("\n".join(result) + "\n", encoding="utf-8")
 
 
-def all_items(since_id: int = 0, limit: int = 500) -> list[dict]:
-    """Read the unified content list from SQLite; JSON is no longer the dashboard source.
+def all_items(offset: int = 0, limit: int = 20) -> list[dict]:
+    """分页读台账（新的在前）。offset/limit 给"滚动加载更多"用。"""
+    return _item_rows("", "LIMIT ? OFFSET ?", (max(1, int(limit)), max(0, int(offset))))
 
-    since_id > 0 时只返回 id 更大的新条目（增量），供前端直接往顶部追加。
+
+def changed_items(since_id: int = 0, since_rev: int = 0, limit: int = 300) -> list[dict]:
+    """变了的东西：新条目（id 更大）或被更新过的老条目（rev 更大）。
+
+    翻译是**就地更新**已有行，id 不变，所以只看 id 会漏掉"译文/四盏灯刚写好"这类变化；
+    rev 由各写入方（translate_db / judge / ai_fallback / 看板改译文）每次 +1。
     """
+    if since_id <= 0 and since_rev <= 0:
+        return []
+    return _item_rows(
+        "WHERE id > ? OR COALESCE(rev, 1) > ?",
+        "LIMIT ?",
+        (int(since_id), int(since_rev), max(1, int(limit))),
+    )
+
+
+def _item_rows(where_sql: str, tail_sql: str, params: tuple) -> list[dict]:
+    """台账查询：WHERE 必须排在 ORDER BY 前面，分页的 LIMIT 排在后面。"""
     try:
         import sqlite3
         db = DATA / "hx.sqlite3"
@@ -177,49 +218,43 @@ def all_items(since_id: int = 0, limit: int = 500) -> list[dict]:
             return []
         conn = sqlite3.connect(db)
         conn.row_factory = sqlite3.Row
-        if since_id > 0:
-            cursor = conn.execute(
-                "SELECT * FROM items WHERE id > ? ORDER BY id DESC LIMIT ?",
-                (since_id, limit),
-            )
-        else:
-            cursor = conn.execute(
-                "SELECT * FROM items ORDER BY COALESCE(published_ts,0) DESC, id DESC LIMIT ?",
-                (limit,),
-            )
-        rows = [dict(r) for r in cursor.fetchall()]
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT * FROM items {where_sql} ORDER BY COALESCE(ts,0) DESC, id DESC {tail_sql}",
+            params,
+        ).fetchall()]
         conn.close()
-        for row in rows:
-            if isinstance(row.get("images"), str):
-                try:
-                    row["images"] = json.loads(row["images"])
-                except Exception:
-                    row["images"] = []
-            row["ori_url"] = row.get("ori_url") or row.get("url") or ""
-            row["images"] = [str(p) for p in (row.get("images") or []) if str(p).strip()]
-            row["_stage"] = row.get("stage", "")
-        return rows
     except Exception as exc:
         print(f"[看板] SQLite 查询失败: {exc}", flush=True)
         return []
+    for row in rows:
+        if isinstance(row.get("images"), str):
+            try:
+                row["images"] = json.loads(row["images"])
+            except Exception:
+                row["images"] = []
+        row["ori_url"] = row.get("ori_url") or row.get("url") or ""
+        row["images"] = [str(p) for p in (row.get("images") or []) if str(p).strip()]
+        row["_stage"] = row.get("stage", "")
+    return rows
 
 
-def item_stats() -> tuple[int, int]:
-    """返回 (总条目数, 当前最大 id)：前者用于计数显示，后者是前端的增量游标。"""
+def item_stats() -> tuple[int, int, int]:
+    """返回 (总条目数, 最大 id, 最大 rev)：前两个用于计数与增量，rev 用于"哪些行被更新过"。"""
     try:
         import sqlite3
         db = DATA / "hx.sqlite3"
         if not db.exists():
-            return 0, 0
+            return 0, 0, 0
         conn = sqlite3.connect(db)
         row = conn.execute(
-            "SELECT COUNT(*) AS total, COALESCE(MAX(id), 0) AS latest FROM items"
+            "SELECT COUNT(*) AS total, COALESCE(MAX(id), 0) AS latest, "
+            "COALESCE(MAX(rev), 0) AS top_rev FROM items"
         ).fetchone()
         conn.close()
-        return int(row[0] or 0), int(row[1] or 0)
+        return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
     except Exception as exc:
         print(f"[看板] SQLite 统计失败: {exc}", flush=True)
-        return 0, 0
+        return 0, 0, 0
 
 
 def services() -> dict:
@@ -241,11 +276,12 @@ def services() -> dict:
 def summary() -> dict:
     """轻量状态：不含条目正文，供 SSE 每秒推送与前端判断是否需要增量拉取。"""
     pending = read_json(DATA / "queue" / "待推送.json", [])
-    total, latest_id = item_stats()
+    total, latest_id, latest_rev = item_stats()
     return {
         "services": services(),
         "item_count": total,
         "latest_id": latest_id,
+        "latest_rev": latest_rev,
         "pending_count": len(pending) if isinstance(pending, list) else 0,
         "env_ready": (ROOT / ".env").exists(),
         "configurable_services": list(CONFIG_FIELDS),
@@ -253,11 +289,19 @@ def summary() -> dict:
     }
 
 
-def snapshot(since_id: int = 0) -> dict:
-    """since_id > 0 时 items 只包含新条目，前端据此只往顶部插入、不重绘旧内容。"""
+def snapshot(offset: int = 0, limit: int = 20, since_id: int = 0, since_rev: int = 0) -> dict:
+    """since_id/since_rev 任一 > 0 → 只回"新条目 + 被更新过的条目"（实时补丁）；
+    否则回第 offset 页（默认 20 条）给首屏与"滚动加载更多"。"""
     data = summary()
-    data["items"] = all_items(since_id)
-    data["incremental"] = since_id > 0
+    changes = since_id > 0 or since_rev > 0
+    data["incremental"] = changes
+    if changes:
+        data["items"] = changed_items(since_id, since_rev)
+    else:
+        data["items"] = all_items(offset, limit)
+        data["offset"] = max(0, int(offset))
+        data["limit"] = max(1, int(limit))
+        data["has_more"] = max(0, int(offset)) + len(data["items"]) < int(data["item_count"] or 0)
     return data
 
 
@@ -327,14 +371,75 @@ def start_service(name: str) -> int:
         return process.pid
 
 
+def _taskkill(pid: int) -> str:
+    """Windows：taskkill /F /T 杀整棵进程树，返回说明。"""
+    last_error = None
+    # 先试着拿到 taskkill 的输出（便于排查）；建不了管道（受限环境）就退化成静默执行。
+    for kwargs in (
+        {"capture_output": True, "text": True, "errors": "replace"},
+        {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL},
+    ):
+        try:
+            result = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], **kwargs)
+            if "capture_output" in kwargs:
+                output = ((result.stdout or "") + (result.stderr or "")).strip().replace("\n", " ")
+                return f"taskkill/T exit={result.returncode} {output}".strip()[:200]
+            return f"taskkill/T exit={result.returncode}"
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+    return f"taskkill 执行失败: {last_error}"
+
+
+def _kill_tree(process) -> str:
+    """把整棵子进程树杀掉，返回用于日志的说明。
+
+    为什么不能只 process.terminate()：service_runner.py 只是"循环壳"，
+    它下面还有 main_flow.py，main_flow 下面还有 translate_db.py / judge.py / ai_fallback.py
+    这些孙子进程。Windows 上 terminate() 只结束直接子进程（TerminateProcess 不递归），
+    于是壳死了、正在跑的那一轮处理照旧跑完 —— 看板显示"已停止"但模型请求还在继续。
+    所以这里在 Windows 上用 taskkill /T 杀整棵树；taskkill 被拒时至少退回 terminate()。
+    """
+    pid = process.pid
+    if os.name == "nt":
+        detail = _taskkill(pid)
+        if "exit=0" in detail:
+            return detail
+        try:
+            process.terminate()          # 退一步：至少把直接子进程结束掉
+            return detail + " + terminate()"
+        except Exception as exc:         # noqa: BLE001
+            return detail + f" + terminate 失败: {exc}"
+    try:
+        import signal
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        return "killpg SIGTERM"
+    except Exception as exc:  # noqa: BLE001
+        try:
+            process.terminate()
+            return f"killpg 失败({exc}) + terminate()"
+        except Exception as inner:  # noqa: BLE001
+            return f"killpg 失败({exc}) terminate 也失败({inner})"
+
+
 def stop_service(name: str) -> bool:
+    """停止服务：连同它正在跑的那一轮处理一起结束。"""
     with LOCK:
         process = PROCESSES.get(name)
-        if process and process.poll() is None:
-            process.terminate()
-            audit("service_stop", {"service": name, "pid": process.pid})
-            return True
-    return False
+        running = bool(process and process.poll() is None)
+    if not running or process is None:
+        return False
+
+    detail = _kill_tree(process)
+    try:                                  # 收尸，避免子进程变僵尸、也让状态立刻变"已停止"
+        process.wait(timeout=10)
+    except Exception:                     # noqa: BLE001
+        try:
+            process.kill()
+        except Exception:
+            pass
+    print(f"[{SERVICE_NAMES.get(name, name)}] 已停止 PID={process.pid}（{detail}）", flush=True)
+    audit("service_stop", {"service": name, "pid": process.pid, "detail": detail})
+    return True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -391,17 +496,28 @@ class Handler(BaseHTTPRequestHandler):
     def auth(self) -> bool:
         return self.headers.get("X-HX-Token", "") == token()
 
-    def query_since_id(self) -> int:
-        """Read ?since_id=N for incremental pulls; missing or invalid means a full load."""
+    def query_int(self, name: str, default: int = 0) -> int:
+        """读 ?name=N（缺失/非法用默认值）。"""
         query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
         try:
-            return max(0, int(query.get("since_id", ["0"])[0]))
+            return max(0, int(query.get(name, [str(default)])[0]))
         except (TypeError, ValueError):
-            return 0
+            return default
 
     def do_GET(self) -> None:
         if self.path.startswith("/api/snapshot"):
-            return self.send_json(200, snapshot(since_id=self.query_since_id()))
+            return self.send_json(200, snapshot(
+                offset=self.query_int("offset", 0),
+                limit=self.query_int("limit", 20) or 20,
+                since_id=self.query_int("since_id", 0),
+                since_rev=self.query_int("since_rev", 0),
+            ))
+        if self.path.startswith("/api/items"):
+            return self.send_json(200, {
+                "items": all_items(self.query_int("offset", 0), self.query_int("limit", 20) or 20),
+                "offset": self.query_int("offset", 0),
+                "limit": self.query_int("limit", 20) or 20,
+            })
         if self.path == "/api/stream":
             return self.send_sse()
         if self.path.startswith("/api/image/"):
@@ -451,8 +567,10 @@ class Handler(BaseHTTPRequestHandler):
                 values={k:payload[k] for k in allowed if k in payload}
                 if not values: raise ValueError('没有可修改字段')
                 db=DATA/'hx.sqlite3'; conn=sqlite3.connect(db)
-                sets=','.join(f'{k}=?' for k in values); params=list(values.values())+[item_id]
-                conn.execute(f'UPDATE items SET {sets}, processed_at=? WHERE id=?', list(values.values())+[time.strftime('%Y-%m-%dT%H:%M:%S'),item_id]); conn.commit(); conn.close()
+                sets=','.join(f'{k}=?' for k in values)
+                # 手改译文后顺手清掉旧错误信息：留着它会让这条被当成"还没翻译好"，下轮把人工改的覆盖掉
+                extra = ", translate_error=''" if 'zh' in values else ""
+                conn.execute(f'UPDATE items SET {sets}, processed_at=?, rev=COALESCE(rev,0)+1{extra} WHERE id=?', list(values.values())+[time.strftime('%Y-%m-%dT%H:%M:%S'),item_id]); conn.commit(); conn.close()
                 audit('item_update',{'id':item_id,'fields':list(values)}); return self.send_json(200,{'ok':True,'id':item_id})
             except Exception as exc: return self.send_json(400,{'error':str(exc)})
         if self.path == "/api/item/delete":

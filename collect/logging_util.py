@@ -25,11 +25,16 @@ def setup_console_encoding() -> None:
         pass
 
 
+def one_line(text: str) -> str:
+    """把消息压成一行：日志按行消费，消息里的换行会把一条记录劈成两半。"""
+    return " ".join(str(text).splitlines())
+
+
 def make_log(log_file: Path, echo: bool = True) -> Callable[[str], None]:
     """造一个 log(msg)：打印 + 追加写 log_file。目录不存在会自动建。"""
 
     def log(msg: str) -> None:
-        line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+        line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {one_line(msg)}"
         if echo:
             print(line, flush=True)
         try:

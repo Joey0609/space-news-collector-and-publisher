@@ -29,6 +29,7 @@ CHECKS = [
     ("collect", HERE / "check_pipeline.py"),
     ("Alison", HERE / "check_ali.py"),
     ("MaiBot plugin", HERE / "check_plugin.py"),
+    ("dashboard", HERE / "check_dashboard.py"),
 ]
 
 
