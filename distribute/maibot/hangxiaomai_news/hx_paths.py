@@ -22,11 +22,13 @@ DATA_DIR = HX_ROOT / "data"
 QUEUE_DIR = DATA_DIR / "queue"
 STATE_DIR = DATA_DIR / "state"
 IMAGE_DIR = DATA_DIR / "images"
-PENDING_FILE = QUEUE_DIR / "待推送.json"
+# 分发队列由看板持有（dashboard/channels.py）：插件作为 WebSocket 渠道连过去，
+# 按自己的节奏 want 一批、发完回报 —— 插件不再直接读数据库、也不再碰旧队列 JSON。
+# 连接凭据：看板 token；端口见 HX_WS_PORT 或默认 8788。
+TOKEN_FILE = STATE_DIR / "dashboard_token.txt"
 SWITCH_FILE = CONFIG_DIR / "功能开关.toml"
 PUSH_DEFAULT_FILE = CONFIG_DIR / "推送默认.toml"
 ARCHIVE_FILE = QUEUE_DIR / "内容留档.json"
-SENT_EVER_FILE = QUEUE_DIR / "已发记录.json"
 REMINDER_FILE = CONFIG_DIR / "提醒待发.txt"
 STATE_FILE = STATE_DIR / "推送状态.json"
 

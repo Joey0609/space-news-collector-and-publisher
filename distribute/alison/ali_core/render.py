@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""排版与候选挑选：把"待推送.json 里的一条"变成"群里要发的那段话"。
+"""排版与候选挑选：把"分发队列里的一条"变成"群里要发的那段话"。
+============================================================
+队列来自 SQLite（decision='发' 且本通道 source 不是 true，见 push_queue.py），
+所以这里**不再判断"发没发过"**——传进来的就是还没发过的。
 
 格式（艾莉森只做纯转述，不写文案）：
     来源：@<原帖作者> · X · UTC+8-YYYY-MM-DD-HH:MM
@@ -9,8 +12,6 @@
     转发@<账号>：<转发者评论> （仅转推且原帖作者有加话时才有）
 """
 import datetime
-
-from .paths import MAX_SENT_RECORDS, TARGET_KIND  # noqa: F401  (供调用方引用)
 
 
 def fmt_beijing(date_str: str, ts) -> str:
@@ -91,34 +92,22 @@ def item_images(item: dict) -> list:
     return imgs
 
 
-def item_sent_to(item: dict) -> list:
-    """该条目已经发给过哪些目标（kind 列表）。"""
-    v = item.get("sent_to", [])
-    return [str(x) for x in (v if isinstance(v, list) else [])]
+def pick_item(items: list, index: int | None = None):
+    """选一条待发条目：优先带图、分数高。返回 (下标, 条目)。
 
-
-def mark_sent_to(item: dict, kind: str) -> None:
-    """标记该条目已发给某个目标。"""
-    cur = item_sent_to(item)
-    if kind and kind not in cur:
-        cur.append(kind)
-    item["sent_to"] = cur
-
-
-def pick_item(items: list, kind: str = TARGET_KIND, index: int | None = None):
-    """选一条还没发给 kind 的条目；优先带图、分数高。返回 (下标, 条目)。"""
+    传进来的 items 已经过滤成"本通道还没发过的"（见 push_queue.pending），
+    所以这里只看 有没有图 / 分数。
+    """
     if index is not None:
         if 0 <= index < len(items):
             return index, items[index]
         return None, None
+    if not items:
+        return None, None
     cands = []
     for i, it in enumerate(items):
-        if kind in item_sent_to(it):
-            continue
         has_img = 1 if item_images(it) else 0
         cands.append((has_img, it.get("score", 0) or 0, i))
-    if not cands:
-        return None, None
     cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return cands[0][2], items[cands[0][2]]
 
@@ -140,9 +129,8 @@ def ts_of(item: dict) -> float:
     return 0.0
 
 
-def pick_newest_unsent(items: list, kind: str = TARGET_KIND):
-    """按时间倒序，取第一条"还没发给本目标"的条目（临时定时推送用）。"""
-    for it in sorted(items, key=ts_of, reverse=True):
-        if kind not in item_sent_to(it):
-            return it
-    return None
+def pick_newest(items: list):
+    """按时间倒序取最新的一条（传进来的已经是"本通道还没发过的"）。"""
+    if not items:
+        return None
+    return sorted(items, key=ts_of, reverse=True)[0]

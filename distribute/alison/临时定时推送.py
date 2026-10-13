@@ -2,7 +2,7 @@
 """临时定时推送（测试用，别当正式程序）
 ====================================
 就是个"通不通"的测试：每 30 分钟，让艾莉森发一条【最新的、还没发给本群】的新闻到群。
-"重复"（本群已发过）就自动跳到次新、次次新……直到找到没发过的。
+队列在数据库里（decision='发' 且本通道 source 不是 true），发过就置 true、下次不会再取到。
 
 运行（在 艾莉森网关 目录下）：
     venv\\Scripts\\python.exe 临时定时推送.py             每30分钟一次（常驻，Ctrl+C 停）
@@ -13,24 +13,19 @@ import datetime
 import sys
 import time
 
-from ali_core.env import api_host, credentials, group_openid, is_sandbox, load_env
-from ali_core.jsonio import load_json, save_json
+from ali_core.env import api_host, credentials, is_sandbox, load_env
+from ali_core.groups import get_group, list_groups
+from ali_core.jsonio import load_json, save_json  # noqa: F401  (留作外部引用)
 from ali_core.log import log, setup_console_encoding
-from ali_core.paths import MAX_SENT_RECORDS, PENDING_FILE, SENT_EVER_FILE, TARGET_KIND
+from ali_core.paths import DB_FILE, MAX_SENT_RECORDS, PENDING_FILE, SENT_EVER_FILE
+import ali_core.push_queue as queue
 from ali_core.qq_api import auth_headers, get_token, send_group_rich, upload_group_image
-from ali_core.render import (
-    build_text,
-    item_images,
-    mark_sent_to,
-    pick_newest_unsent,
-    ts_of,  # noqa: F401  (留作调试/外部引用)
-)
+from ali_core.render import build_text, item_images, pick_newest, ts_of  # noqa: F401
 
 INTERVAL = 1800  # 30 分钟
-KIND = TARGET_KIND
 
 
-def send_one() -> bool:
+def send_one(group_openid: str = "") -> bool:
     """发一条：最新的、没发给本群的。返回是否真发了。"""
     env = load_env()
     appid, secret = credentials(env)
@@ -39,14 +34,17 @@ def send_one() -> bool:
         return False
     host = api_host(env)
 
-    goid = group_openid(log)
-    if not goid:
+    available = list_groups(enabled_only=True)
+    goid = group_openid or (available[0]["group_openid"] if available else "")
+    group = get_group(goid) if goid else {}
+    if not group or not group["is_member"] or not group["push_enabled"]:
+        log("没有启用推送的群；请在看板启用群，或用 --group <已启用群OpenID> 指定。")
         return False
 
-    items = load_json(PENDING_FILE, []) or []
-    item = pick_newest_unsent(items, KIND)
+    items = queue.pending(goid)
+    item = pick_newest(items)
     if item is None:
-        log(f"没有'没发给本群'的新闻了（共 {len(items)} 条）")
+        log("没有'没发给本群'的新闻了（待发 0 条）")
         return False
 
     text = build_text(item)
@@ -70,18 +68,21 @@ def send_one() -> bool:
         log("发送失败，未标记（下轮重试）")
         return False
 
-    mark_sent_to(item, KIND)
-    save_json(PENDING_FILE, items)
-    records = load_json(SENT_EVER_FILE, []) or []
-    records.append(item)
-    save_json(SENT_EVER_FILE, records[-MAX_SENT_RECORDS:])
-    log(f"已发送并标记 {KIND}")
+    queue.mark([item["id"]], goid)
+    log(f"已发送并标记 {queue.source_for(goid)}")
     return True
 
 
 def main():
     args = sys.argv[1:]
     once = "--once" in args
+    group = ""
+    if "--group" in args:
+        try:
+            group = str(args[args.index("--group") + 1]).strip()
+        except IndexError:
+            log("--group 后面缺少群 OpenID")
+            return
     interval = INTERVAL
     if "--interval" in args:
         try:
@@ -90,15 +91,16 @@ def main():
             interval = INTERVAL
 
     log("=" * 50)
-    log(f"临时定时推送（测试）启动 | 间隔 {interval} 秒 | 目标 {KIND}")
+    log(f"临时定时推送（测试）启动 | 间隔 {interval} 秒 | "
+        f"目标 {group or '已启用群目录的第一项'}")
 
     if once:
-        send_one()
+        send_one(group)
         return
 
     while True:
         try:
-            send_one()
+            send_one(group)
         except Exception as e:
             log(f"本轮出错: {e}")
         log(f"睡 {interval} 秒，下一轮 {datetime.datetime.now().strftime('%H:%M')} 后...")

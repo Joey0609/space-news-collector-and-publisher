@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
-"""数据存档层：抓取基线 / 扫描游标 / 待推送队列 / 已发记录。
+"""数据存档层：抓取基线 / 扫描游标 / 已发记录。
 
 这里是"文件格式的唯一出处"——想加字段先看这里。所有写入都容错（失败只记日志，
 不抛异常），保证定时任务不会因为一次写盘失败整体中断。
+
+注意：**待推送队列已经不在 JSON 里了**——队列就是 items 表里 decision='发' 的行，
+"这条发给过谁"记在 items.pushed（见 distribute/push_db.py）。这里不再有
+load_pending / append_pending。
 """
 from typing import Callable
 
 from .jsonio import load_json, save_json
 from .paths import (
     BASELINE_FILE,
-    CONFIG_DIR,
     CURSOR_FILE,
-    MAX_PENDING,
     MAX_SENT,
-    PENDING_FILE,
-    QUEUE_ARCHIVE_FILE,
     SENT_FILE,
 )
 
@@ -37,17 +37,7 @@ def save_cursor(cursor: int) -> None:
     save_json(CURSOR_FILE, {"cursor": int(cursor)})
 
 
-# ────────────────────────── 待推送队列（模块5 写 / 插件·推送读）──────────────────────────
-
-def load_pending() -> list:
-    """读 待推送.json。"""
-    data = load_json(PENDING_FILE, [])
-    return data if isinstance(data, list) else []
-
-
-def save_pending(items: list) -> None:
-    save_json(PENDING_FILE, items)
-
+# ────────────────────────── 已发记录（模块5/分发端的历史留档）──────────────────────────
 
 def load_sent_keys() -> set:
     """读已发记录，返回 {(account, zh)} 集合；失败返回空。"""
@@ -80,31 +70,3 @@ def append_sent_records(items: list, log: Callable[[str], None] = print) -> None
             records.append(it)
             seen.add(key)
     save_sent_records(records)
-
-
-def append_pending(items: list, log: Callable[[str], None] = print) -> None:
-    """把应发的新闻追加到 待推送.json。
-
-    - 队列上限 MAX_PENDING：超出部分存到"队列档案"防丢失。
-    - 去重：按 (account, zh) 去掉队列内重复；跳过已在"已发记录"里的（永不重推）。
-    """
-    old = load_pending()
-    seen = {(str(x.get("account", "")), str(x.get("zh", ""))) for x in old}
-    sent = load_sent_keys()
-    add = []
-    for it in items:
-        key = (str(it.get("account", "")), str(it.get("zh", "")))
-        if key in seen or key in sent:
-            continue
-        seen.add(key)
-        add.append(it)
-    merged = old + add
-    if len(merged) > MAX_PENDING:
-        overflow = merged[:MAX_PENDING]
-        archived = merged[MAX_PENDING:]
-        exist = load_json(QUEUE_ARCHIVE_FILE, []) or []
-        save_json(QUEUE_ARCHIVE_FILE, exist + archived)
-        merged = overflow
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    save_pending(merged)
-    log(f"[待推送] 新增 {len(add)} 条，当前队列 {len(merged)}（上限{MAX_PENDING}）")

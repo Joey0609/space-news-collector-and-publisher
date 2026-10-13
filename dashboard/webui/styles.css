@@ -29,11 +29,83 @@ main {
 }
 
 .topbar {
-    height: 88px;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 20px;
+    flex-wrap: wrap;
+    min-height: 88px;
+    padding-top: 10px;
+    padding-bottom: 10px;
     border-bottom: 1px solid var(--line)
+}
+
+.topbar__brand {
+    display: flex;
+    flex-direction: column;
+    justify-content: center
+}
+
+.topbar__status {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 3px;
+    text-align: right
+}
+
+/* 处理 / 分发 tab：选中态明显 */
+.tabs {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: #eef3fb
+}
+
+.tabs button {
+    padding: 8px 24px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: #4a5c78;
+    font-size: 14px;
+    font-weight: 700;
+    box-shadow: none
+}
+
+.tabs button:hover {
+    background: #e2ebf9;
+    transform: none;
+    box-shadow: none
+}
+
+.tabs button.active {
+    background: #fff;
+    color: var(--blue);
+    box-shadow: 0 2px 8px rgba(25, 55, 95, .14)
+}
+
+.tabs button.active:hover {
+    background: #fff
+}
+
+.conn {
+    font-size: 12px;
+    font-weight: 700
+}
+
+.conn-idle {
+    color: var(--muted)
+}
+
+.conn-on {
+    color: #12834b
+}
+
+.conn-off {
+    color: #c53030
 }
 
 .product-mark,
@@ -155,12 +227,6 @@ button.secondary {
     box-shadow: none
 }
 
-.layout {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 270px;
-    gap: 18px
-}
-
 .panel {
     padding: 22px
 }
@@ -207,14 +273,6 @@ button.secondary {
     margin-top: 8px;
     color: var(--muted);
     font-size: 12px
-}
-
-.summary {
-    height: max-content
-}
-
-.summary h2 {
-    margin: 5px 0 18px
 }
 
 .summary-row {
@@ -410,12 +468,14 @@ dialog::backdrop {
 }
 
 @media(max-width:850px) {
-    .layout {
-        grid-template-columns: 1fr
+    .tabs {
+        order: 3;
+        flex: 1 1 100%;
+        justify-content: center
     }
 
-    .summary {
-        display: none
+    .tabs button {
+        flex: 1 1 auto
     }
 }
 
@@ -428,7 +488,8 @@ dialog::backdrop {
     }
 
     .topbar {
-        height: 76px
+        min-height: 76px;
+        gap: 12px
     }
 
     .services {
@@ -1083,4 +1144,441 @@ dialog::backdrop {
     .item-main { padding-right: 0 }
     .item { grid-template-columns: 1fr }
     .thumb { width: 100%; height: auto; max-height: 240px }
+}
+
+/* ============ 运行摘要卡片（顶替原"分发服务"卡片位） ============ */
+.summary-card .summary-grid {
+    margin-top: 16px
+}
+
+.summary-card .summary-row {
+    padding: 9px 0;
+    font-size: 13px
+}
+
+/* 摘要里的小字：各渠道一行状态 */
+.channel-brief {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 6px
+}
+
+.channel-brief__row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--muted)
+}
+
+.channel-brief__name {
+    color: #31415c;
+    font-weight: 650;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis
+}
+
+.channel-brief__meta {
+    margin-left: auto;
+    white-space: nowrap
+}
+
+.channel-brief__empty {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px
+}
+
+.dot {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #cbd5e1
+}
+
+.dot-on { background: #2fb45f }
+.dot-down { background: #e05252 }
+.dot-off { background: #cbd5e1 }
+
+/* ============ 内容列表：占满 100% 宽度 ============ */
+.content {
+    width: 100%
+}
+
+/* ============ 分发 tab：渠道卡片 ============ */
+.view[hidden] {
+    display: none !important
+}
+
+.section-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 4px 0 14px
+}
+
+.section-head h2 {
+    margin: 4px 0 0;
+    font-size: 18px
+}
+
+.channels {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+    margin-bottom: 22px
+}
+
+.channel-card {
+    display: flex;
+    flex-direction: column;
+    padding: 18px 20px 16px;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, .9);
+    box-shadow: var(--shadow);
+    transition: transform .22s ease, box-shadow .22s ease
+}
+
+.channel-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 20px 42px rgba(25, 55, 95, .12)
+}
+
+.channel-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px
+}
+
+.channel-head__text {
+    min-width: 0
+}
+
+.channel-head h3 {
+    margin: 0;
+    font-size: 16px;
+    letter-spacing: -.01em
+}
+
+.channel-sub {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 7px
+}
+
+.channel-sub code {
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: #eef3fb;
+    color: #3b4d6b;
+    font: 11px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace
+}
+
+.badge {
+    padding: 2px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    font-size: 11px;
+    font-weight: 700
+}
+
+.badge-on {
+    border-color: #b7e2c4;
+    background: #f0fbf4;
+    color: #1f7a45
+}
+
+.badge-down {
+    border-color: #f0c9c9;
+    background: #fdf3f3;
+    color: #a33
+}
+
+.badge-off {
+    border-color: var(--line);
+    background: #f4f6fa;
+    color: var(--muted)
+}
+
+.channel-card button {
+    flex: 0 0 auto;
+    padding: 8px 14px;
+    font-size: 13px
+}
+
+.channel-metrics {
+    display: flex;
+    gap: 22px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line)
+}
+
+.channel-metrics div {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0
+}
+
+.channel-metrics span {
+    color: var(--muted);
+    font-size: 11px
+}
+
+.channel-metrics b {
+    color: #1d2d45;
+    font-size: 15px;
+    font-variant-numeric: tabular-nums
+}
+
+.channel-targets {
+    list-style: none;
+    margin: 14px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px
+}
+
+.channel-targets li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #fbfdff;
+    font-size: 13px
+}
+
+.target-label {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: #31415c
+}
+
+.target-pending {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums
+}
+
+.target-pending.has {
+    color: #b45309;
+    font-weight: 700
+}
+
+.target-empty {
+    justify-content: center;
+    color: var(--muted);
+    font-size: 12px
+}
+
+.channel-note {
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-wrap: anywhere
+}
+
+.empty-card {
+    margin: 0;
+    padding: 26px 22px;
+    border: 1px dashed #cdd8e8;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, .7);
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.7;
+    text-align: center
+}
+
+/* ============ 最近分发记录 ============ */
+.table-wrap {
+    overflow-x: auto
+}
+
+.pushes {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px
+}
+
+.pushes th {
+    padding: 0 12px 9px 0;
+    border-bottom: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: .06em;
+    text-align: left;
+    white-space: nowrap
+}
+
+.pushes td {
+    padding: 11px 12px 11px 0;
+    border-bottom: 1px solid var(--line);
+    color: #24344d;
+    vertical-align: top
+}
+
+.pushes tr:last-child td {
+    border-bottom: 0
+}
+
+.pushes .mono {
+    color: var(--muted);
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+    white-space: nowrap
+}
+
+.pushes td.pushes-empty {
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+    padding: 22px 0
+}
+
+/* ============ 小提示（替代 alert） ============ */
+.toasts {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    z-index: 95;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none
+}
+
+.toast {
+    max-width: min(520px, calc(100vw - 40px));
+    padding: 9px 14px;
+    border-radius: 10px;
+    background: #16233a;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.55;
+    text-align: center;
+    overflow-wrap: anywhere;
+    box-shadow: 0 14px 34px rgba(15, 35, 65, .34);
+    animation: tip-in .14s ease-out
+}
+
+.toast-error {
+    background: #7f1d1d
+}
+
+.toast-ok {
+    background: #14532d
+}
+
+/* 艾莉森专用弹窗；现有服务配置与内容详情不受影响 */
+.channel-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end }
+.alison-dialog { width: min(880px, calc(100% - 32px)); border-radius: 8px }
+.alison-dialog[open] { display: flex; flex-direction: column; animation: dialog-in .2s cubic-bezier(.2,.8,.2,1) both }
+.alison-dialog[open].is-closing { animation: alison-out .16s ease-in both }
+.alison-dialog.is-closing::backdrop { animation: alison-backdrop-out .16s ease-in both }
+@keyframes alison-out { to { opacity: 0; transform: translateY(8px) scale(.99) } }
+@keyframes alison-backdrop-out { to { opacity: 0 } }
+.alison-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 22px 26px 18px; border-bottom: 1px solid #dbe8fa; background: linear-gradient(135deg,#f8fbff,#eef5ff) }
+.alison-head h2 { margin: 5px 0; font-size: 21px }
+.alison-head p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5 }
+.alison-head .close { border-radius: 8px; flex: 0 0 auto }
+.alison-scroll { min-height: 0; overflow-y: auto; padding: 20px 26px 26px }
+.alison-message { margin: 0; color: var(--muted); font-size: 13px }
+.alison-message:empty { display: none }
+.alison-error { color: #b42332 !important }
+.alison-section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px }
+.alison-section-head h3 { margin: 3px 0 0; font-size: 17px }
+.alison-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 15px }
+.alison-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; color: #31415c; font-size: 13px; font-weight: 700 }
+.alison-field small { color: var(--muted); font-weight: 400 }
+.alison-field input, .alison-field select, .alison-add-form input { width: 100%; min-width: 0; height: 40px; padding: 0 11px; border: 1px solid #cdd8e8; border-radius: 7px; background: #fff; color: #1e2a3b; font: inherit; font-size: 14px }
+.alison-field input:focus-visible, .alison-field select:focus-visible, .alison-add-form input:focus-visible, .alison-dialog button:focus-visible, .alison-dialog input[type=checkbox]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px }
+.alison-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 65px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #fbfdff; cursor: pointer }
+.alison-switch-row span { display: grid; gap: 4px; min-width: 0 }
+.alison-switch-row strong { font-size: 12px; overflow-wrap: anywhere }
+.alison-switch-row small { color: var(--muted); font-size: 12px }
+.alison-dialog input[type=checkbox][role=switch] { appearance: none; position: relative; flex: 0 0 auto; width: 38px; height: 22px; margin: 0; border: 1px solid #adbacf; border-radius: 20px; background: #cbd5e1; cursor: pointer; transition: background .18s ease }
+.alison-dialog input[type=checkbox][role=switch]::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px #27374b44; transition: transform .18s ease }
+.alison-dialog input[type=checkbox][role=switch]:checked { border-color: var(--blue); background: var(--blue) }
+.alison-dialog input[type=checkbox][role=switch]:checked::after { transform: translateX(16px) }
+.alison-dialog input[type=checkbox][role=switch]:disabled { opacity: .55; cursor: wait }
+.alison-dialog button:disabled { opacity: .55; cursor: wait; transform: none; box-shadow: none }
+.alison-save-row { display: flex; justify-content: flex-end; align-items: center; gap: 12px; min-height: 63px; color: #1f7a45; font-size: 12px }
+.alison-groups { padding-top: 20px; border-top: 1px solid var(--line) }
+.alison-note { margin: 0 0 14px; padding: 11px 13px; border: 1px solid #dbe8fa; border-radius: 8px; background: #f5f9ff; color: #465b78; font-size: 12px; line-height: 1.6 }
+.alison-progress { margin: 0 0 12px; color: #2857ae; font-size: 12px; font-weight: 650 }
+.alison-groups-list { display: grid; gap: 10px }
+.alison-group-card { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff }
+.alison-group-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px }
+.alison-group-identity { min-width: 0 }
+.alison-group-identity h4 { margin: 0 0 4px; font-size: 14px }
+.alison-group-identity code { display: block; color: #536780; font-size: 12px; overflow-wrap: anywhere; user-select: all }
+.alison-group-toggle { display: inline-flex; align-items: center; gap: 9px; flex: 0 0 auto; color: #31415c; font-size: 12px; cursor: pointer }
+.alison-group-info p { margin: 9px 0 0; color: #465b78; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere }
+.alison-group-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px }
+.alison-group-tags:empty { display: none }
+.alison-group-tags span { padding: 3px 7px; border: 1px solid #dbe8fa; border-radius: 6px; background: #f3f7ff; color: #3b4d6b; font-size: 11px }
+.alison-group-meta { display: flex; flex-wrap: wrap; gap: 5px 14px; margin-top: 10px; color: var(--muted); font-size: 11px }
+.alison-group-info .alison-group-error { color: #b42332 }
+.alison-empty { margin: 0; padding: 20px; border: 1px dashed #cdd8e8; border-radius: 8px; color: var(--muted); font-size: 13px; line-height: 1.6; text-align: center }
+.alison-add-form { display: grid; gap: 8px; margin-top: 16px; color: #31415c; font-size: 12px; font-weight: 650 }
+.alison-add-form > div { display: flex; gap: 8px }
+.alison-add-form > span { min-height: 14px; color: #1f7a45; font-weight: 400 }
+@media(max-width:640px) {
+  .channel-actions { width: 100%; justify-content: stretch }
+  .channel-actions button { flex: 1 1 0; width: auto }
+  .alison-dialog { width: calc(100% - 16px); max-height: calc(100dvh - 16px) }
+  .alison-head { padding: 17px 16px }
+  .alison-scroll { padding: 17px 16px 22px }
+  .alison-fields { grid-template-columns: 1fr }
+  .alison-section-head { align-items: flex-start }
+  .alison-section-head button { flex: 0 0 auto; padding: 8px 10px }
+  .alison-group-top { flex-wrap: wrap }
+  .alison-add-form > div { flex-wrap: wrap }
+  .alison-add-form button { width: 100% }
+}
+@media(prefers-reduced-motion:reduce) {
+    .alison-dialog[open], .alison-dialog[open].is-closing,
+    .alison-dialog::backdrop, .alison-dialog.is-closing::backdrop { animation: none }
+}
+
+
+@media(max-width:640px) {
+    .channel-card {
+        padding: 16px
+    }
+
+    .channel-head {
+        flex-direction: column;
+        align-items: stretch
+    }
+
+    .channel-card button {
+        width: 100%
+    }
+
+    .channel-metrics {
+        flex-wrap: wrap;
+        gap: 14px 20px
+    }
 }

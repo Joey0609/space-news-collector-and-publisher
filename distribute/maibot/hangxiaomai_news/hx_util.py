@@ -2,7 +2,10 @@
 """hx_util.py · 纯工具函数（不碰文件、不碰 ctx，随便复用）
 =====================================================
 - 列表归一化：把"配置里可能写成 str / list / 逗号串"的字段统一成 list[str]
-- 条目去重键与 sent_to 标记：私聊/各群"各发各的、互不占用"靠它
+- 条目去重键：内容留档按 账号+内容 去重
+
+注意：私聊/各群"各发各的、互不占用"现在由 SQLite 的 `items.pushed` 负责
+（每个目标一个 source，见 hx_push_db.py），这里不再有 sent_to 标记。
 """
 from typing import Any
 
@@ -39,19 +42,5 @@ def as_bool(v: Any) -> bool:
 
 
 def dedup_key(item: dict) -> tuple:
-    """条目去重键：账号 + 中文译文（与原实现一致，永不重推靠它）。"""
+    """条目去重键：账号 + 中文译文（内容留档去重用）。"""
     return str(item.get("account", "")), str(item.get("zh", ""))
-
-
-def item_sent_to(item: dict) -> list:
-    """条目已发给哪些目标 kind（私聊/群各自独立、不漏发靠它）。"""
-    v = item.get("sent_to", [])
-    return [str(x) for x in (v if isinstance(v, list) else [])]
-
-
-def mark_item_sent(item: dict, kind: str) -> None:
-    """记录"该条目已发给某目标 kind"。"""
-    cur = item_sent_to(item)
-    if kind and kind not in cur:
-        cur.append(kind)
-    item["sent_to"] = cur

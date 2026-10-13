@@ -17,21 +17,59 @@ from .paths import ENV_FILE, STATE_FILE
 
 def load_env() -> dict:
     """读 .env；同一键优先用进程环境变量（便于临时覆盖）。文件不存在返回 {}。"""
+    env = load_env_file()
+    for key in ("APPID", "SECRET", "SANDBOX", "SANDBOX_GROUP"):
+        if os.getenv(key):
+            env[key] = os.getenv(key)
+    return env
+
+
+def load_env_file() -> dict:
+    """只读同目录 .env（不叠加进程环境变量），供 Dashboard 展示/编辑其实际持久配置。"""
     env: dict = {}
     try:
         if ENV_FILE.exists():
-            for raw in ENV_FILE.read_text(encoding="utf-8").splitlines():
-                s = raw.strip()
-                if not s or s.startswith("#") or "=" not in s:
+            for raw in ENV_FILE.read_text(encoding="utf-8-sig").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
                     continue
-                k, v = s.split("=", 1)
-                env[k.strip()] = v.strip().strip('"').strip("'")
-    except Exception:
+                key, value = line.split("=", 1)
+                env[key.strip()] = value.strip().strip('"').strip("'")
+    except OSError:
         pass
-    for k in ("APPID", "SECRET", "SANDBOX", "SANDBOX_GROUP"):
-        if os.getenv(k):
-            env[k] = os.getenv(k)
     return env
+
+
+def save_env_updates(updates: dict, allowed=None) -> list:
+    """原样保留其它键，只更新允许的 .env 字段；返回实际更新的 key，不返回值。"""
+    allowed = set(allowed or ("APPID", "SECRET", "SANDBOX"))
+    clean = {}
+    for key, value in (updates or {}).items():
+        if key not in allowed or not isinstance(value, (str, int, float, bool)):
+            continue
+        text = str(value).strip()
+        if "\n" in text or "\r" in text:
+            raise ValueError("配置值不能包含换行")
+        clean[key] = text
+    lines = ENV_FILE.read_text(encoding="utf-8-sig").splitlines() if ENV_FILE.exists() else []
+    seen = set()
+    out = []
+    for line in lines:
+        key, sep, _ = line.partition("=")
+        name = key.strip()
+        if sep and name in clean:
+            out.append(f"{name}={clean[name]}")
+            seen.add(name)
+        else:
+            out.append(line)
+    for key, value in clean.items():
+        if key not in seen:
+            out.append(f"{key}={value}")
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp = ENV_FILE.with_suffix(ENV_FILE.suffix + ".tmp")
+    temp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+    temp.replace(ENV_FILE)
+    return sorted(clean)
 
 
 def is_sandbox(env: dict) -> bool:

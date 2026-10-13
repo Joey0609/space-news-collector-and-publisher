@@ -426,6 +426,133 @@ parsed_q = llm.parse_analysis('{"zh":"译文","quoted_zh":"被引用的正文翻
 check("解析 quoted_zh", parsed_q["quoted_zh"] == "被引用的正文翻译", parsed_q)
 check("没有 quoted_zh 时给空串", llm.parse_analysis('{"zh":"译文","is_news":true}')["quoted_zh"] == "")
 
+print("[9] 分发队列（SQLite）：source 注册 / 待发判定 / 标记已发")
+import json  # noqa: E402
+import distribute.push_db as qdb  # noqa: E402
+
+qcase = SANDBOX / "push_case"
+qcase.mkdir(parents=True, exist_ok=True)
+qdb_file = qcase / "hx.sqlite3"
+if qdb_file.exists():
+    qdb_file.unlink()
+qconn = sqlite3.connect(qdb_file)
+cdb.ensure_schema(qconn)          # 真库的建表口径：pushed 列 + pushes 表都由它建
+for item_id, account, zh, decision in ((1, "SpaceX", "星舰", "发"), (2, "NASA", "月球", "发"),
+                                       (3, "路人", "闲聊", "丢")):
+    qconn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score)"
+                  " VALUES(?,?,?,?,?,?)", (item_id, account, zh, "raw", decision, 80))
+qconn.commit()
+qconn.close()
+
+
+def _q(sql):
+    conn = sqlite3.connect(qdb_file)
+    try:
+        row = conn.execute(sql).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+check("pushed 列由 collect/db.py 的 schema 建出来（不是分发端临时加的）",
+      "pushed" in {r[1] for r in sqlite3.connect(qdb_file).execute("PRAGMA table_info(items)")})
+check("pushes 审计表同样由 schema 建出来", _q(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='pushes'") == "pushes")
+check("未注册 source 时：待发 = 全部 decision='发'（'丢'的不算）",
+      [it["id"] for it in qdb.pending(db_file=qdb_file)] == [1, 2])
+
+# 这一段只测注册/标记，先把"旧 JSON 迁移"的输入关掉，免得读到真实 data/queue/待推送.json
+_real_queue_files, _real_sent_files = qdb.LEGACY_QUEUE_FILES, qdb.LEGACY_SENT_FILES
+qdb.LEGACY_QUEUE_FILES, qdb.LEGACY_SENT_FILES = (), ()
+
+check("注册两个 source", qdb.register_sources(["maibot:private", "maibot:group_G1"],
+                                          db_file=qdb_file) == ["maibot:private", "maibot:group_G1"])
+check("重复注册不重复添加",
+      qdb.register_sources(["maibot:private"], db_file=qdb_file) == [])
+check("source 进了 meta 注册表",
+      sorted(qdb.registry(db_file=qdb_file)) == ["maibot:group_G1", "maibot:private"],
+      qdb.registry(db_file=qdb_file))
+check("新 source 对已有行默认未发（缺键按 false）",
+      [it["id"] for it in qdb.pending(source="maibot:private", db_file=qdb_file)] == [1, 2])
+
+check("标记已发返回改动条数", qdb.mark_pushed([1], "maibot:private", db_file=qdb_file) == 1)
+check("重复标记不重复计数", qdb.mark_pushed([1], "maibot:private", db_file=qdb_file) == 0)
+check("标记会给 source 置 true",
+      json.loads(_q("SELECT pushed FROM items WHERE id=1")).get("maibot:private") is True)
+check("私聊发过 ≠ 群发过（粒度到目标，不是到通道）",
+      [it["id"] for it in qdb.pending(source="maibot:group_G1", db_file=qdb_file)] == [1, 2])
+check("pushes 审计表写入且幂等",
+      _q("SELECT COUNT(*) FROM pushes") == 1 and _q("SELECT sent_at FROM pushes"))
+check("看板口径：还有 source 没发完就算待分发", qdb.pending_count(db_file=qdb_file) == 2)
+check("指定只计启用 source：关掉的群不应计入摘要",
+      qdb.pending_count(db_file=qdb_file, sources=["maibot:private"]) == 1
+      and qdb.pending_count(db_file=qdb_file, sources=[]) == 0)
+
+# 新通道（如艾莉森）第一次注册：旧 source 全发过的行不能灌给新通道
+qdb.mark_pushed([1], "maibot:group_G1", db_file=qdb_file)
+qdb.register_sources(["alison:group_A"], db_file=qdb_file)
+check("新 source 回填：旧 source 全发过的行 → 新 source 直接 true（不灌历史）",
+      json.loads(_q("SELECT pushed FROM items WHERE id=1")).get("alison:group_A") is True)
+check("新 source 回填：还没发完的行 → 新 source 记 false（新通道照样能取）",
+      json.loads(_q("SELECT pushed FROM items WHERE id=2")).get("alison:group_A") is False)
+check("新通道只拿到还没发完的那条",
+      [it["id"] for it in qdb.pending(source="alison:group_A", db_file=qdb_file)] == [2])
+
+print("[9b] 旧 待推送.json / 已发记录.json 的状态一次性迁移进 pushed")
+seed_case = SANDBOX / "seed_case"
+seed_case.mkdir(parents=True, exist_ok=True)
+seed_db = seed_case / "hx.sqlite3"
+if seed_db.exists():
+    seed_db.unlink()
+(seed_case / "待推送.json").write_text(json.dumps([
+    {"id": 5, "account": "SpaceX", "zh": "星舰", "sent_to": ["private"]},   # 只发过私聊
+    {"id": 4, "account": "旧账号", "zh": "旧闻", "sent_to": ["private", "group_G1"]},
+], ensure_ascii=False), encoding="utf-8")
+(seed_case / "已发记录.json").write_text(json.dumps(
+    [{"account": "Blue", "zh": "已发过的"}], ensure_ascii=False), encoding="utf-8")
+sconn = sqlite3.connect(seed_db)
+cdb.ensure_schema(sconn)
+for row in ((3, "老条目", "队列写下之前就在库里"), (4, "旧账号", "旧闻"),
+            (5, "SpaceX", "星舰"), (6, "Blue", "已发过的"), (7, "New", "队列之后的新条目")):
+    sconn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score)"
+                  " VALUES(?,?,?,'raw','发',50)", row)
+sconn.commit()
+sconn.close()
+
+_real_queue_files, _real_sent_files = qdb.LEGACY_QUEUE_FILES, qdb.LEGACY_SENT_FILES
+qdb.LEGACY_QUEUE_FILES = (seed_case / "待推送.json",)
+qdb.LEGACY_SENT_FILES = (seed_case / "已发记录.json",)
+qdb.register_sources(["maibot:private", "maibot:group_G1"], db_file=seed_db)
+
+
+def _seed_pushed(item_id):
+    conn = sqlite3.connect(seed_db)
+    try:
+        row = conn.execute("SELECT pushed FROM items WHERE id=?", (item_id,)).fetchone()
+    finally:
+        conn.close()
+    return json.loads(row[0] or "{}")
+
+
+check("迁移：旧队列里 sent_to 只列了 private → 群那份还是未发",
+      _seed_pushed(5).get("maibot:private") is True
+      and _seed_pushed(5).get("maibot:group_G1") is False, _seed_pushed(5))
+check("迁移：旧队列里两个 kind 都发过 → 都标 true",
+      _seed_pushed(4).get("maibot:private") is True
+      and _seed_pushed(4).get("maibot:group_G1") is True, _seed_pushed(4))
+check("迁移：不在旧队列但 id 更小（当年发完被移除）→ 不重推",
+      _seed_pushed(3).get("maibot:private") is True, _seed_pushed(3))
+check("迁移：在旧已发记录里 → 不重推",
+      _seed_pushed(6).get("maibot:private") is True, _seed_pushed(6))
+check("迁移：比旧队列更新的条目 → 留给分发端去发",
+      not _seed_pushed(7).get("maibot:private"), _seed_pushed(7))
+check("迁移只跑一次（第二次注册不再动状态）",
+      qdb.seed_if_needed(db_file=seed_db) == 0)
+qdb.LEGACY_QUEUE_FILES, qdb.LEGACY_SENT_FILES = _real_queue_files, _real_sent_files
+
+# 注：插件侧不再直接读库（它通过看板的渠道 WebSocket 拉内容，见 selftest/check_channels.py），
+# 所以这里没有"插件镜像 vs 仓库实现"的对照用例了。
+
 tdb_conn.close()
 import shutil as _shutil  # noqa: E402
 _shutil.rmtree(case, ignore_errors=True)

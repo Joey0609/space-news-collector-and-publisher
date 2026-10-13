@@ -4,12 +4,14 @@
 跑法（在任意目录都行）：
     python 自检/run_all.py
 
-做什么：分别在**独立子进程**里跑三份自检，汇总结果。
-    自检/check_pipeline.py  抓取脚本  侧：导入 + 打标打分 + 新条目构造
-    自检/check_ali.py       艾莉森网关侧：导入 + 排版/候选挑选
-    自检/check_plugin.py    麦麦插件  侧：装配 + 一轮调度 + Hook 落盘
+做什么：分别在**独立子进程**里跑几份自检，汇总结果。
+    check_pipeline.py   采集/处理侧：导入 + 打标打分 + 新条目构造 + 分发队列口径
+    check_channels.py   分发渠道：真 socket 的 WS 往返（注册/推送/拉取/回报/写库）
+    check_ali.py        艾莉森网关侧：导入 + 排版/候选挑选
+    check_plugin.py     麦麦插件侧：装配 + 一轮调度（渠道替身）+ Hook 落盘
+    check_dashboard.py  看板：服务标签 + HTTP API 契约 + 停止服务 + 分页
 
-为什么用子进程：三份自检会各自往 sys.path 加桩模块、也会 import 同名顶层模块
+为什么用子进程：几份自检会各自往 sys.path 加桩模块、也会 import 同名顶层模块
 （hx_paths / 推送 等），同进程跑会互相串味。
 """
 import subprocess
@@ -27,6 +29,7 @@ REPO = HERE.parent
 
 CHECKS = [
     ("collect", HERE / "check_pipeline.py"),
+    ("channels", HERE / "check_channels.py"),
     ("Alison", HERE / "check_ali.py"),
     ("MaiBot plugin", HERE / "check_plugin.py"),
     ("dashboard", HERE / "check_dashboard.py"),

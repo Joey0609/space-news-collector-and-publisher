@@ -46,7 +46,7 @@ class PushConfig(PluginConfigBase):
     target_qq: str = Field(default="YOUR_QQ_ID", description="推送到哪个QQ私聊")
     target_groups: list[str] = Field(default_factory=lambda: ["YOUR_GROUP_ID_1"],
                                      description="推送到哪些QQ群(群号列表)")
-    poll_interval: int = Field(default=30, description="检测待推送文件的间隔(秒)")
+    poll_interval: int = Field(default=30, description="轮询分发队列(数据库)的间隔(秒)")
     auto_switch: bool = Field(default=True, description="是否遵守功能开关(新闻推送 off 则不推)")
 
 

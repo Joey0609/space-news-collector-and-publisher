@@ -1,23 +1,24 @@
 # -*- coding: utf-8 -*-
 """航小麦 · 新闻推送插件 (模块4 · 麦麦侧)
 =======================================
-作用：检测"待推送"文件里有没有值得发的航天内容；有的话，按每个目标(私聊/各群)自己的
-      节奏设置，以麦麦口吻主动推送（来源行 + 译文 + 配图 + 麦麦的一句评论）。
+作用：连上看板的渠道 WebSocket，按每个目标(私聊/各群)自己的节奏要内容，
+      以麦麦口吻主动推送（来源行 + 译文 + 配图 + 麦麦的一句评论），发完回报结果。
 
 工作链路：
-    外部主流程(模块5) 判定"该发" → 写 配置/待推送.json
-    → 本插件 on_load 起后台 asyncio 任务，每 30 秒判断一次"现在该不该开口"
-    → 该开口时用麦麦人设生成话术 → ctx.send 发出 → 标记 sent_to / 记已发记录
-    → 所有目标都发过的条目才从队列移除
+    外部主流程(模块5) 判定"该发" → 结果留在 SQLite（items.decision='发'）
+    → **看板**（dashboard/channels.py）持有分发队列，在 127.0.0.1:8788 上开渠道 WebSocket
+    → 本插件作为**渠道**连过去（拉取模式）：按自己的节奏 `want` 一批 → 用麦麦口吻发
+      → 逐条回报结果 → 看板收到 ok 才写库（items.pushed 置 true、pushes 记审计）
 
-本文件只做"接线"：插件生命周期 + 私聊自然语言改配置的 Hook。
+本文件只做"接线"：插件生命周期 + 渠道客户端 + 私聊自然语言改配置的 Hook。
 其余都在同目录模块里（都不依赖麦麦宿主，便于单测）：
     hx_paths.py     路径与内置默认值（含目录层级硬约定）
     hx_config.py    配置模型 + "生效设置"(内置默认→推送默认→个人/每群偏好) + ConfigMixin
     hx_state.py     推送节奏状态（推送状态.json）
-    hx_store.py     待推送/留档/已发记录/功能开关 的文件读写
+    hx_ws.py        渠道 WebSocket 客户端（自包含，协议见 dashboard/PROTOCOL.md）
+    hx_store.py     留档/功能开关 的文件读写
     hx_toml.py      TOML 读写（中文 key 加引号）
-    hx_util.py      列表归一化、sent_to 标记、去重键
+    hx_util.py      列表归一化与去重键
     hx_llm.py       直连模型 API（文案/翻译/解析）+ 读麦麦人设
     hx_render.py    来源行、正文、转发评论、图片 base64
     hx_send.py      SendMixin：stream_id 解析 + 底层发送
@@ -50,6 +51,7 @@ if __package__ in (None, ""):   # 作为顶层模块加载（sys.path 上已有�
     from hx_schedule import ScheduleMixin
     from hx_send import SendMixin
     from hx_state import save_field, save_fields
+    from hx_ws import ChannelClient
 else:                            # 正常包内导入
     from .hx_config import ConfigMixin, HangxiaomaiNewsPluginConfig
     from .hx_fallback import FallbackMixin
@@ -58,25 +60,53 @@ else:                            # 正常包内导入
     from .hx_schedule import ScheduleMixin
     from .hx_send import SendMixin
     from .hx_state import save_field, save_fields
+    from .hx_ws import ChannelClient
+
+import threading  # noqa: E402  (渠道客户端跑在自己的线程里)
 
 
 class HangxiaomaiNewsPlugin(ConfigMixin, SendMixin, FallbackMixin, ScheduleMixin, MaiBotPlugin):
     """航小麦新闻推送插件。
 
-    Mixin 分工见模块 docstring；本类只管生命周期与 Hook。
+    Mixin 分工见模块 docstring；本类只管生命周期、渠道客户端与 Hook。
     """
 
     config_model = HangxiaomaiNewsPluginConfig
     _task: asyncio.Task | None = None
+    _channel_client = None
+    _channel_thread: threading.Thread | None = None
 
     # ────────────────────────── 生命周期 ──────────────────────────
 
+    def _target_label(self, kind: str) -> str:
+        """给看板显示的 target 名：私聊 / 群 <群号>。"""
+        return "私聊" if kind == "private" else f"群 {kind.removeprefix('group_')}"
+
+    def _start_channel(self) -> None:
+        """建渠道客户端并起线程（拉取模式：服务端不主动推，我们按节奏 want）。"""
+        kinds = self._configured_kinds()
+        if not kinds:
+            self.ctx.logger.warning("没有配置推送目标，渠道不启动")
+            return
+        client = ChannelClient(
+            "maibot", "麦麦插件",
+            targets=[{"kind": kind, "label": self._target_label(kind)} for kind in kinds],
+            adapter="plugin", pull=True,
+            logger=lambda message: self.ctx.logger.info(str(message)),
+        )
+        self._channel_client = client
+        self._channel_thread = threading.Thread(
+            target=client.run_forever, args=(None,), name="hx-channel-maibot", daemon=True)
+        self._channel_thread.start()
+        self.ctx.logger.info(f"航小麦渠道客户端已启动（source: {client.sources or kinds}，"
+                             f"看板 {getattr(client, 'host', '?')}:{getattr(client, 'port', '?')}）")
+
     async def on_load(self) -> None:
-        """插件加载：若启用，起后台轮询任务；并把节奏状态归零（避免一开机就猛推）。"""
+        """插件加载：若启用，起渠道客户端 + 后台节奏轮询；并把节奏状态归零（避免一开机就猛推）。"""
         if not self.config.plugin.enabled:
             self.ctx.logger.info("航小麦新闻推送插件未启用")
             return
-        self.ctx.logger.info("航小麦新闻推送插件已启用，开始后台轮询待推送")
+        self.ctx.logger.info("航小麦新闻推送插件已启用，开始连接看板渠道并轮询")
         try:
             now = time.time()
             # 开机/重载：把所有目标的"上次推送时间"重置为现在、清空"空内容"计数
@@ -98,12 +128,17 @@ class HangxiaomaiNewsPlugin(ConfigMixin, SendMixin, FallbackMixin, ScheduleMixin
                 save_field(STATE_FILE, f"prev_active_{kind}", int(self._is_active_hours(st)))
         except Exception as e:
             self.ctx.logger.warning(f"初始化推送状态失败: {e}")
+        self._start_channel()
         self._task = asyncio.create_task(self._poll_loop())
         asyncio.create_task(self._send_reminder_if_pending())
 
     async def on_unload(self) -> None:
         if self._task:
             self._task.cancel()
+        client = self._channel_client
+        if client is not None:
+            client.stopped = True
+            client.close()
 
     def _configured_kinds(self) -> list:
         """当前配置里所有推送目标的 kind：私聊 "private" + 每个群 "group_<群号>"。"""

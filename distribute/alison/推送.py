@@ -1,46 +1,46 @@
 # -*- coding: utf-8 -*-
 """艾莉森推送 v1 · 纯转述图文发送器
 ================================
-作用：从 配置/待推送.json 取一条"还没发给本群"的真新闻，
+作用：从**数据库分发队列**（decision='发' 且本通道 source 还没发过）取一条真新闻，
       用艾莉森（QQ 官方接口）把「来源行 + 正文 (+图)」**原样转述**到指定群。
       艾莉森不写文案（符合「★ 新架构」）。
 
 不依赖常驻网关：走纯 HTTP OpenAPI（取 token → 上传图 → 发消息）。
+队列不再是 待推送.json：发完会把 `items.pushed` 里本通道的 source 置 true（见 ali_core/push_queue.py）。
 
 用法（在 艾莉森网关 目录下）：
     venv\\Scripts\\python.exe 推送.py --list            只列出候选，不发送
     venv\\Scripts\\python.exe 推送.py --dry              演练：只打印要发的内容，不真发
     venv\\Scripts\\python.exe 推送.py --once             取1条（优先带图）真发到群
     venv\\Scripts\\python.exe 推送.py --once --no-image  取1条纯文字真发
-    venv\\Scripts\\python.exe 推送.py --once --index 3   指定待推送.json 里第 3 条
+    venv\\Scripts\\python.exe 推送.py --once --group <已启用群OpenID>  指定目标群
     venv\\Scripts\\python.exe 推送.py --upload-only <图> 只测图片上传
 
 实现拆分：路径 ali_core/paths.py、日志 ali_core/log.py、.env/state ali_core/env.py、
-        OpenAPI ali_core/qq_api.py、排版 ali_core/render.py。
+        OpenAPI ali_core/qq_api.py、排版 ali_core/render.py、队列 ali_core/push_queue.py。
 （本文件末尾保留了旧名 re-export：临时定时推送.py 等按 `推送.xxx` 取值也能用。）
 """
 import sys
 
-from ali_core.env import api_host, credentials, group_openid, is_sandbox, load_env, load_state
+from ali_core.env import api_host, credentials, is_sandbox, load_env, load_state
+from ali_core.groups import get_group, list_groups
 from ali_core.jsonio import load_json, save_json  # noqa: F401
 from ali_core.log import log, setup_console_encoding
 from ali_core.paths import (  # noqa: F401
+    DB_FILE,
     HTTP_TIMEOUT,
     MAX_SENT_RECORDS,
     PENDING_FILE,
     SENT_EVER_FILE,
     STATE_FILE,
-    TARGET_GROUP_NUMBER,
-    TARGET_KIND,
 )
+import ali_core.push_queue as queue
 from ali_core.qq_api import auth_headers, get_token, send_group_rich, upload_group_image
 from ali_core.render import (  # noqa: F401
     build_source_line,
     build_text,
     fmt_beijing,
     item_images,
-    item_sent_to,
-    mark_sent_to,
     pick_item,
 )
 
@@ -53,6 +53,7 @@ def parse_args(argv: list) -> dict:
         "once": "--once" in argv,
         "no_image": "--no-image" in argv,
         "index": None,
+        "group": "",
         "upload_only": "",
     }
     if "--index" in argv:
@@ -60,6 +61,11 @@ def parse_args(argv: list) -> dict:
             args["index"] = int(argv[argv.index("--index") + 1])
         except Exception:
             args["index"] = None
+    if "--group" in argv:
+        try:
+            args["group"] = str(argv[argv.index("--group") + 1]).strip()
+        except IndexError:
+            args["group"] = ""
     if "--upload-only" in argv:
         try:
             args["upload_only"] = argv[argv.index("--upload-only") + 1]
@@ -80,11 +86,16 @@ def main():
         log("❌ 未配置 APPID/SECRET：请复制 艾莉森网关\\.env.example 为 .env 并填写")
         sys.exit(1)
 
-    goid = group_openid(log)
+    candidates = list_groups(enabled_only=True)
+    goid = args["group"] or (candidates[0]["group_openid"] if candidates else "")
+    group = get_group(goid) if goid else {}
     log("=" * 50)
-    log(f"艾莉森推送 v1 | 目标群 {TARGET_GROUP_NUMBER} openid={goid} | 环境={'沙箱' if sandbox else '正式'}")
-    if not goid:
-        sys.exit(1)
+    if not group or not group["is_member"] or not group["push_enabled"]:
+        log("没有启用推送的群。先在看板「分发 → 艾莉森 → 配置」启用群，"
+            "或用 --group <已启用群OpenID> 选择目标。")
+        return
+    log(f"艾莉森手动推送 | 目标群 {group['group_name'] or goid} openid={goid} | "
+        f"环境={'沙箱' if sandbox else '正式'}")
 
     # 只测"上传图片"：推送.py --upload-only <图片路径>
     if args["upload_only"]:
@@ -97,17 +108,14 @@ def main():
             log(f"[upload-only] 失败: {e}")
         return
 
-    items = load_json(PENDING_FILE, []) or []
-    log(f"待推送.json 共 {len(items)} 条")
-    idx, item = pick_item(items, TARGET_KIND, args["index"])
+    items = queue.pending(goid)
+    log(f"分发队列（本群 source={queue.source_for(goid)}）共 {len(items)} 条待发")
+    idx, item = pick_item(items, args["index"])
 
     if args["list"] or item is None:
-        cnt = sum(1 for it in items if TARGET_KIND not in item_sent_to(it))
-        log(f"尚未发到本群的候选：{cnt} 条")
+        log(f"尚未发到本群的候选：{len(items)} 条")
         if args["list"]:
             for i, it in enumerate(items):
-                if TARGET_KIND in item_sent_to(it):
-                    continue
                 log(f"  #{i} score={it.get('score')} 图={len(item_images(it))} "
                     f"@{it.get('account')} {str(it.get('zh') or '')[:40]}")
         if item is None and not args["list"]:
@@ -140,12 +148,9 @@ def main():
     ok = send_group_rich(host, hdrs, goid, text, file_info)
 
     if ok:
-        mark_sent_to(item, TARGET_KIND)
-        save_json(PENDING_FILE, items)
-        records = load_json(SENT_EVER_FILE, []) or []
-        records.append(item)
-        save_json(SENT_EVER_FILE, records[-MAX_SENT_RECORDS:])
-        log(f"✅ 已发送并标记 {TARGET_KIND}")
+        # 发完才标记：写数据库（items.pushed 里本通道 source = true），不再动任何 JSON 队列
+        queue.mark([item["id"]], goid)
+        log(f"✅ 已发送并标记 {queue.source_for(goid)}")
     else:
         log("❌ 发送失败（文字和图都没成功），未标记")
 

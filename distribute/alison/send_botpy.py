@@ -6,6 +6,16 @@
 """
 import asyncio
 import sys
+from pathlib import Path
+
+ALI = Path(__file__).resolve().parent
+REPO = ALI.parents[1]
+if str(REPO) in sys.path:
+    sys.path.remove(str(REPO))
+sys.path.insert(0, str(REPO))
+if str(ALI) in sys.path:
+    sys.path.remove(str(ALI))
+sys.path.insert(0, str(ALI))
 
 from botpy.api import BotAPI
 from botpy.http import BotHttp

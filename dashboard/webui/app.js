@@ -1,12 +1,18 @@
 const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 let token = localStorage.getItem("hx_token") || "";
 let cache = new Map();
 let detail = null;
 let activeConfig = "";
+let activeTab = "process";
 let latestId = 0;
+let latestRev = 0;
 let loaded = false;
 let lastState = {};
+let itemTotal = 0;      // 库里的总条数（stats.item_count / 拍平的 item_count 都算）
+let channels = [];
+let configurable = ["collect", "process"];
 
 const hints = {
   PROXY_URL: "X 访问代理地址，可留空。",
@@ -26,7 +32,6 @@ const hints = {
   TRANSLATE_INLINE_RETRIES: "遇到限流/超时时，同一轮内当场重试几次。",
   TRANSLATE_RATE_LIMIT_WAIT: "限流/超时后等待多少秒再重试。",
   PROCESS_INTERVAL_SECONDS: "处理间隔秒数。",
-  DISTRIBUTE_CHANNEL: "分发通道。",
 };
 
 const protocolLabels = {
@@ -34,6 +39,90 @@ const protocolLabels = {
   responses: "responses（OpenAI Responses API）",
   anthropic: "anthropic compatible（/messages）",
 };
+
+const SERVICE_LABELS = { collect: "采集", process: "处理" };
+const ADAPTER_LABELS = { plugin: "插件", process: "托管进程" };
+
+/* ── 统一的 {ok, data} / {ok:false, error} 信封 ──────────────────────────────
+   所有 GET/POST 都带 X-HX-Token；401 时重新取一次 token 再打一遍（只重试一次）。 */
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = "ApiError";
+    this.status = Number(status || 0);
+  }
+}
+
+function readToken(force = false) {
+  if (!token || force) {
+    token = prompt("请输入看板 token（启动看板时的终端会打印）") || "";
+    localStorage.setItem("hx_token", token);
+  }
+  return token;
+}
+
+async function request(path, options = {}) {
+  const method = options.method || "GET";
+  const body = options.body === undefined ? null : options.body;
+  const retry = options.retry !== false;
+  const headers = { "X-HX-Token": readToken() };
+  const init = { method, headers, cache: "no-store" };
+  if (body !== null) {
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+
+  const response = await fetch(path, init);
+  if (response.status === 401 && retry) {
+    readToken(true);                                  // token 过期/不对：重输一次再试
+    return request(path, { method, body, retry: false });
+  }
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    payload = null;
+  }
+  if (!payload || typeof payload !== "object") {
+    throw new ApiError(`接口没有返回 JSON（HTTP ${response.status}）`, response.status);
+  }
+  if (payload.ok !== true) {
+    throw new ApiError(payload.error || `请求失败（HTTP ${response.status}）`, response.status);
+  }
+  return payload.data;
+}
+
+const apiGet = (path) => request(path);
+const apiPost = (path, body) => request(path, { method: "POST", body: body || {} });
+
+/* ── 小提示（和现有 tooltip 一个风格），不用 alert ── */
+function toastHost() {
+  // 模态 dialog 在 top layer：提示也得挂在里面，否则被盖住
+  const host = document.querySelector("dialog[open]") || document.body;
+  let box = host.querySelector(":scope > .toasts");
+  if (!box) {
+    box = document.createElement("div");
+    box.className = "toasts";
+    host.append(box);
+  }
+  return box;
+}
+
+function notify(message, kind = "error") {
+  const text = String(message ?? "").trim();
+  if (!text) return;
+  const box = document.createElement("div");
+  box.className = `toast toast-${kind}`;
+  box.setAttribute("role", kind === "error" ? "alert" : "status");
+  box.textContent = text;
+  toastHost().append(box);
+  setTimeout(() => box.remove(), kind === "error" ? 6000 : 2400);
+}
+
+function reportError(error, fallback = "操作失败") {
+  notify(error && error.message ? error.message : fallback, "error");
+}
 
 /* 配置项标题：字段名 + 一个 ⓘ 图标；说明用浮层 tooltip（点开 / 再点或点别处关闭）
    注意别用 <label> 包这颗按钮：label 会把点击转发给包着的按钮，点字段名也会弹提示。 */
@@ -49,7 +138,7 @@ function fieldLabel(key, hint) {
 
 /* ── 浮层 tooltip ──
    必须挂在"当前打开的 <dialog> 里面"：模态 dialog 在浏览器 top layer，挂到 <body> 上的元素
-   哪怕 z-index 再大也会被它盖住（这就是刚才提示看不见的原因）。挂在 dialog 内、用 fixed 定位，
+   哪怕 z-index 再大也会被它盖住。挂在 dialog 内、用 fixed 定位，
    再按 dialog 自己的边界翻转，就不会被 dialog 的 overflow:hidden 裁掉。 */
 let hintTip = null;
 let hintAnchor = null;
@@ -194,7 +283,7 @@ function lightText(item) {
   const values = LIGHTS.map((light) => lightValue(item, light.key));
   if (values.every((value) => value === null)) return "";
   const state = lightStateOf(item);
-  if (state === "green") return "三绿";
+  if (state === "green") return "全绿";
   if (state === "red") {
     const reds = LIGHTS.filter((light) => lightValue(item, light.key) === false)
       .map((light) => light.label);
@@ -259,17 +348,6 @@ function chipRow(item) {
   return parts.join("");
 }
 
-async function auth() {
-  if (!token) {
-    token = prompt("请输入看板 token") || "";
-    localStorage.setItem("hx_token", token);
-  }
-  return {
-    "Content-Type": "application/json",
-    "X-HX-Token": token,
-  };
-}
-
 function imageOf(item) {
   if (Array.isArray(item.images)) return item.images[0] || "";
   return item.image || "";
@@ -287,6 +365,19 @@ function formatDate(value) {
   const text = String(value || "");
   const match = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
   return match ? `${match[1]} ${match[2]}` : text;
+}
+
+/* 时间戳可能是 "2026-09-21T10:00:00" 也可能是 Unix 秒 */
+function formatTime(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  const text = String(value);
+  if (/^\d{9,}$/.test(text)) {
+    const date = new Date(Number(text) * 1000);
+    if (!Number.isNaN(date.getTime())) {
+      return date.toLocaleString("zh-CN", { hour12: false });
+    }
+  }
+  return formatDate(value) || "—";
 }
 
 function imageUrl(path) {
@@ -328,37 +419,312 @@ function buildItem(item) {
   return element;
 }
 
-function renderSummary(state) {
-  lastState = state;
+/* ── 状态：/api/state、/api/snapshot、SSE 都是同一份 data ── */
+/* 新协议把统计放在 data.stats 里，老形状是平铺在 data 上；两边都认，省得对齐出错。 */
+function statValue(data, key, fallback = 0) {
+  if (data && data.stats && data.stats[key] !== undefined && data.stats[key] !== null) {
+    return data.stats[key];
+  }
+  if (data && data[key] !== undefined && data[key] !== null) return data[key];
+  return fallback;
+}
 
-  for (const name of ["collect", "process", "distribute"]) {
-    const service = state.services?.[name] || {};
+function mergeState(data) {
+  for (const [key, value] of Object.entries(data)) {
+    if (value !== undefined) lastState[key] = value;
+  }
+}
+
+function setConnection(ok) {
+  const conn = $("#conn");
+  if (!conn) return;
+  conn.textContent = ok ? "实时连接正常" : "连接中断";
+  conn.className = `conn ${ok ? "conn-on" : "conn-off"}`;
+}
+
+/* 一次 state/snapshot 响应：能认出来的字段都刷一遍（缺字段就不动，别把界面清空） */
+function applyState(data) {
+  if (!data || typeof data !== "object") return;
+  mergeState(data);
+
+  if (data.services) renderServices(data.services);
+  if (data.configurable !== undefined || data.configurable_services !== undefined) {
+    const value = data.configurable !== undefined ? data.configurable : data.configurable_services;
+    // 正常是服务名数组；万一是布尔（"后端能不能配"）就别把它当数组用
+    if (Array.isArray(value)) configurable = value;
+    else configurable = value ? ["collect", "process"] : [];
+    renderConfigButtons();
+  }
+  if (Array.isArray(data.channels)) {
+    channels = data.channels;
+    renderChannelBrief();
+    if (activeTab === "distribute") renderChannels();
+  }
+  // /api/state 把计数放在 stats 里，/api/snapshot 是拍平在顶层的；取到哪个算哪个
+  const incomingTotal = statValue(data, "item_count", null);
+  const incomingPending = statValue(data, "pending_count", null);
+  if (incomingTotal !== null) itemTotal = Number(incomingTotal);
+  if (incomingTotal !== null || incomingPending !== null) renderCounters(data);
+  if (data.env_ready !== undefined) renderEnv(data.env_ready);
+  renderTimestamp(data.ts);
+}
+function renderServices(services) {
+  for (const name of ["collect", "process"]) {
+    const service = services[name] || {};
     const status = $(`#${name}-state`);
     const button = $(`[data-service="${name}"]`);
 
     if (status) {
-      status.textContent = (service.state || "已停止") +
+      status.textContent = (service.state || (service.running ? "运行中" : "已停止")) +
         (service.pid ? ` · PID ${service.pid}` : "");
       status.className = service.running ? "running" : "stopped";
     }
     if (button) button.textContent = service.running ? "停止" : "启动";
   }
+}
 
-  $("#count").textContent = state.item_count || 0;
-  $("#pending").textContent = state.pending_count || 0;
-  $("#env").textContent = state.env_ready ? "已配置" : "未配置";
-  $("#updated").textContent = new Date().toLocaleTimeString();
+function renderConfigButtons() {
+  const list = Array.isArray(configurable) ? configurable : [];
+  for (const button of $$("[data-config]")) {
+    const name = button.dataset.config;
+    const can = list.includes(name);
+    button.hidden = !can;
+    button.disabled = !can;
+  }
+}
+
+function renderCounters(data) {
+  const pending = Number(statValue(data, "pending_count", 0));
+  const count = $("#count");
+  if (count) count.textContent = itemTotal;
+  const pendingEl = $("#pending");
+  if (pendingEl) pendingEl.textContent = pending;
+  updateListStatus();
+}
+
+function renderEnv(ready) {
+  const element = $("#env");
+  if (!element) return;
+  element.textContent = ready ? "已就绪" : "未就绪";
+  element.className = ready ? "running" : "stopped";
+}
+
+function renderTimestamp(ts) {
+  const updated = $("#updated");
+  if (!updated) return;
+  const date = ts ? new Date(Number(ts) * 1000) : new Date();
+  const stamp = Number.isNaN(date.getTime()) ? new Date() : date;
+  updated.textContent = `更新于 ${stamp.toLocaleTimeString("zh-CN", { hour12: false })}`;
+}
+
+/* ── 渠道（运行摘要里的小字 + 分发 tab 的卡片） ── */
+/* 服务端给的是真布尔，但 int 0/1、"0" 也一起认，别把停用的渠道当成启用 */
+function channelEnabled(channel) {
+  const value = channel.enabled;
+  if (value === undefined || value === null) return true;
+  if (value === false || value === 0 || value === "0" || value === "false") return false;
+  return true;
+}
+
+function channelConnected(channel) {
+  return channelEnabled(channel) && Boolean(channel.connected);
+}
+
+function channelStatus(channel) {
+  if (!channelEnabled(channel)) return { cls: "off", text: "已停用" };
+  if (channel.connected) return { cls: "on", text: "已连接" };
+  return { cls: "down", text: "未连接" };
+}
+
+/* 插件渠道 = 启用/停用推送；托管进程渠道 = 真的启停进程 */
+function channelAction(channel) {
+  const enabled = channelEnabled(channel);
+  const isPlugin = channel.adapter === "plugin";
+  if (isPlugin) {
+    return { text: enabled ? "停用推送" : "启用推送", cls: enabled ? "secondary" : "" };
+  }
+  return { text: enabled ? "停止" : "启动", cls: enabled ? "secondary" : "" };
+}
+
+function renderChannelBrief() {
+  const online = channels.filter(channelConnected).length;
+  const onlineEl = $("#channel-online");
+  if (onlineEl) onlineEl.textContent = `${online} / ${channels.length}`;
+  const totalEl = $("#channel-total");
+  if (totalEl) totalEl.textContent = channels.length;
+  const stateEl = $("#summary-state");
+  if (stateEl) {
+    stateEl.textContent = channels.length
+      ? `${channels.length} 个渠道 · ${online} 个在线`
+      : "还没有登记分发渠道";
+  }
+
+  const box = $("#channel-brief");
+  if (!box) return;
+  if (!channels.length) {
+    box.innerHTML = `<p class="channel-brief__empty">没有登记任何分发渠道。</p>`;
+    return;
+  }
+  box.innerHTML = channels.map((channel) => {
+    const status = channelStatus(channel);
+    const pending = Number(channel.pending || 0);
+    return `<div class="channel-brief__row">
+        <i class="dot dot-${status.cls}"></i>
+        <span class="channel-brief__name">${esc(channel.label || channel.id)}</span>
+        <span class="channel-brief__meta">${esc(status.text)}${pending ? ` · 待发 ${pending}` : ""}</span>
+      </div>`;
+  }).join("");
+}
+
+function targetHtml(target) {
+  const label = target.label || target.kind || target.source || "—";
+  const pending = Number(target.pending || 0);
+  return `<li><span class="target-label">${esc(label)}</span>
+    <span class="target-pending${pending ? " has" : ""}">待发 ${pending}</span></li>`;
+}
+
+function channelCard(channel) {
+  const status = channelStatus(channel);
+  const action = channelAction(channel);
+  const targets = Array.isArray(channel.targets) ? channel.targets : [];
+  // 备注优先用 note（渠道自报的 status.note）；没有就退回服务端给的 status 文案
+  let note = String(channel.note || "").trim();
+  const extra = String(channel.status || "").trim();
+  if (!note && extra && extra !== status.text) note = extra;
+  return `
+    <article class="channel-card">
+      <div class="channel-head">
+        <div class="channel-head__text">
+          <h3>${esc(channel.label || channel.id)}</h3>
+          <div class="channel-sub"><code>${esc(channel.id)}</code>
+            <span class="chip">${esc(ADAPTER_LABELS[channel.adapter] || channel.adapter || "未知类型")}</span>
+            <span class="badge badge-${status.cls}">${esc(status.text)}</span>
+          </div>
+        </div>
+        <div class="channel-actions">
+          ${String(channel.id).toLowerCase() === "alison" ? `<button type="button" class="secondary" data-channel-config="alison">配置</button>` : ""}
+          <button class="${action.cls}" data-channel-toggle="${esc(channel.id)}">${esc(action.text)}</button>
+        </div>
+      </div>
+      <div class="channel-metrics">
+        <div><span>待分发</span><b>${Number(channel.pending || 0)}</b></div>
+        <div><span>累计发送</span><b>${Number(channel.sent_total || 0)}</b></div>
+        <div><span>最近活动</span><b>${esc(formatTime(channel.last_seen))}</b></div>
+      </div>
+      <ul class="channel-targets">
+        ${targets.length ? targets.map(targetHtml).join("") : `<li class="target-empty">还没有注册目标</li>`}
+      </ul>
+      ${note ? `<p class="channel-note">备注：${esc(note)}</p>` : ""}
+    </article>`;
+}
+
+function renderChannels() {
+  const box = $("#channels");
+  if (!box) return;
+  if (!channels.length) {
+    box.innerHTML = `<p class="empty-card">还没有任何分发渠道。插件类渠道连上服务端、或看板把托管进程拉起来之后，就会出现在这里。</p>`;
+    return;
+  }
+  box.innerHTML = channels.map(channelCard).join("");
+}
+
+async function refreshChannels(silent = false) {
+  try {
+    const data = await apiGet("/api/channels");
+    channels = Array.isArray(data?.channels) ? data.channels : [];
+    renderChannelBrief();
+    renderChannels();
+  } catch (error) {
+    if (!silent) notify(`渠道列表读取失败：${error.message}`, "error");
+  }
+}
+
+async function toggleChannel(id) {
+  const channel = channels.find((entry) => String(entry.id) === String(id));
+  if (!channel) return;
+  const enabled = channelEnabled(channel);
+  try {
+    await apiPost("/api/channels/toggle", { channel: id, enabled: !enabled });
+    notify(`${channel.label || id}：${enabled ? "已停用" : "已启用"}`, "ok");
+    await refreshChannels();
+    loadPushes();
+  } catch (error) {
+    reportError(error, "渠道操作失败");
+  }
+}
+
+/* ── 最近分发记录 ── */
+function pushTitle(push) {
+  const title = String(push.title || push.ai_title || "").trim();
+  if (title) return title;
+  const zh = String(push.zh || "").trim().replace(/\s+/g, " ");
+  if (zh) return zh.length > 40 ? `${zh.slice(0, 40)}…` : zh;
+  return push.item_id !== undefined && push.item_id !== null ? `#${push.item_id}` : "—";
+}
+
+function renderPushes(pushes, errorText = "") {
+  const body = $("#pushes-body");
+  if (!body) return;
+  if (errorText) {
+    body.innerHTML = `<tr><td colspan="4" class="pushes-empty">${esc(errorText)}</td></tr>`;
+    return;
+  }
+  if (!pushes.length) {
+    body.innerHTML = `<tr><td colspan="4" class="pushes-empty">还没有分发记录。</td></tr>`;
+    return;
+  }
+  body.innerHTML = pushes.map((push) => {
+    const target = push.label || push.kind || push.source || "—";
+    return `<tr>
+      <td class="mono">${esc(formatTime(push.sent_at))}</td>
+      <td>${esc(push.channel || "—")}</td>
+      <td>${esc(target)}</td>
+      <td>${esc(pushTitle(push))}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadPushes(silent = false) {
+  try {
+    const data = await apiGet("/api/pushes?limit=20");
+    renderPushes(Array.isArray(data?.pushes) ? data.pushes : []);
+  } catch (error) {
+    // 定时轮询失败就静默跳过，保留表里已有的记录，不刷一屏红字
+    if (!silent) renderPushes([], `分发记录读取失败：${error.message}`);
+  }
+}
+
+/* ── tab 切换：只切视图，不重新加载整页 ── */
+function switchTab(tab) {
+  activeTab = tab === "distribute" ? "distribute" : "process";
+  for (const button of $$("[data-tab]")) {
+    const active = button.dataset.tab === activeTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  const processView = $("#view-process");
+  const distributeView = $("#view-distribute");
+  if (processView) processView.hidden = activeTab !== "process";
+  if (distributeView) distributeView.hidden = activeTab !== "distribute";
+
+  if (activeTab === "distribute") {
+    renderChannels();
+    refreshChannels();
+    loadPushes();
+  } else {
+    maybeLoadMore();
+  }
 }
 
 /* ── 列表：默认 20 条，滚到还剩 10 条时再加载 20 条 ── */
 const PAGE_SIZE = 20;        // 首屏与每次加载的条数
 const LOAD_AHEAD = 10;       // 视口下方还剩这么多条目就开始加载下一页
 const RECONCILE_MS = 15000;  // 定时全量核对（防止 SSE 丢事件导致漏内容）
+const PUSHES_MS = 10000;     // 分发 tab 打开时刷新最近分发记录的间隔
 const MAX_WINDOW = 300;      // 定时核对一次最多比对多少条，避免大库拖慢前端
 
 let shownCount = 0;          // 当前列表里"应该显示"的条数
 let hasMore = false;
-let latestRev = 0;
 let loadingMore = false;
 
 function elementOf(key) {
@@ -452,25 +818,26 @@ function refreshItem(item) {
 function updateListStatus() {
   const status = $("#list-status");
   if (!status) return;
-  const total = Number(lastState.item_count || 0);
-  status.textContent = `已显示 ${shownCount} / 共 ${total} 条`;
+  status.textContent = `已显示 ${shownCount} / 共 ${itemTotal} 条`;
   const more = $("#load-more");
   if (more) more.hidden = !hasMore;
 }
 
 async function loadAll() {
   try {
-    const state = await (await fetch(`/api/snapshot?offset=0&limit=${PAGE_SIZE}`)).json();
-    renderSummary(state);
-    replaceItems(state.items || []);
-    latestId = Math.max(latestId, Number(state.latest_id || 0));
-    latestRev = Math.max(latestRev, Number(state.latest_rev || 0));
-    shownCount = (state.items || []).length;
-    hasMore = Boolean(state.has_more);
+    const data = await apiGet(`/api/snapshot?offset=0&limit=${PAGE_SIZE}`);
+    applyState(data);
+    replaceItems(data.items || []);
+    latestId = Math.max(latestId, Number(statValue(data, "latest_id", 0)));
+    latestRev = Math.max(latestRev, Number(statValue(data, "latest_rev", 0)));
+    shownCount = (data.items || []).length;
+    hasMore = data.has_more !== undefined ? Boolean(data.has_more) : shownCount < itemTotal;
     loaded = true;
     updateListStatus();
+    setConnection(true);
   } catch (error) {
-    $("#updated").textContent = "连接失败";
+    setConnection(false);
+    reportError(error, "首屏加载失败");
   }
 }
 
@@ -481,14 +848,17 @@ async function loadMore() {
   const more = $("#load-more");
   if (more) more.textContent = "加载中…";
   try {
-    const state = await (await fetch(`/api/items?offset=${shownCount}&limit=${PAGE_SIZE}`)).json();
-    const items = state.items || [];
+    const data = await apiGet(`/api/items?offset=${shownCount}&limit=${PAGE_SIZE}`);
+    const items = data.items || [];
     appendItems(items);
     shownCount += items.length;
-    hasMore = items.length >= PAGE_SIZE;
+    const total = data.total !== undefined && data.total !== null
+      ? Number(data.total)
+      : itemTotal;
+    hasMore = items.length >= PAGE_SIZE && shownCount < total;
     applyFilter();
   } catch (error) {
-    /* 下次滚动再试 */
+    notify(`加载更多失败：${error.message}`, "error");
   } finally {
     loadingMore = false;
     if (more) more.textContent = "加载更多";
@@ -498,6 +868,7 @@ async function loadMore() {
 
 /* 视口下方还剩几条？剩 ≤ LOAD_AHEAD 就补一页。 */
 function maybeLoadMore() {
+  if (activeTab !== "process") return;   // 分发 tab 下列表是隐藏的，量出来的位置没意义
   if (!loaded || !hasMore || loadingMore) return;
   const viewport = window.innerHeight;
   let below = 0;
@@ -513,13 +884,12 @@ function maybeLoadMore() {
 async function pullChanges() {
   if (!loaded) return 0;
   try {
-    const state = await (await fetch(
-      `/api/snapshot?since_id=${latestId}&since_rev=${latestRev}`)).json();
-    renderSummary(state);
-    const items = state.items || [];
+    const data = await apiGet(`/api/snapshot?since_id=${latestId}&since_rev=${latestRev}`);
+    applyState(data);
+    const items = data.items || [];
     const touched = items.length ? upsertItems(items) : 0;
-    latestId = Math.max(latestId, Number(state.latest_id || 0));
-    latestRev = Math.max(latestRev, Number(state.latest_rev || 0));
+    latestId = Math.max(latestId, Number(statValue(data, "latest_id", 0)));
+    latestRev = Math.max(latestRev, Number(statValue(data, "latest_rev", 0)));
     updateListStatus();
     return touched;
   } catch (error) {
@@ -533,9 +903,9 @@ async function reconcile() {
   if (!loaded) return;
   const limit = Math.min(Math.max(shownCount, PAGE_SIZE), MAX_WINDOW);
   try {
-    const state = await (await fetch(`/api/snapshot?offset=0&limit=${limit}`)).json();
-    renderSummary(state);
-    const items = state.items || [];
+    const data = await apiGet(`/api/snapshot?offset=0&limit=${limit}`);
+    applyState(data);
+    const items = data.items || [];
     const keys = items.map(keyOf);
     const domKeys = [...$("#items").children].map((element) => element.dataset.key);
 
@@ -558,15 +928,16 @@ async function reconcile() {
     for (const element of [...$("#items").children]) {
       if (!keys.includes(element.dataset.key)) removeItem(element.dataset.key);
     }
-    latestId = Math.max(latestId, Number(state.latest_id || 0));
-    latestRev = Math.max(latestRev, Number(state.latest_rev || 0));
-    hasMore = shownCount < Number(state.item_count || 0);
+    latestId = Math.max(latestId, Number(statValue(data, "latest_id", 0)));
+    latestRev = Math.max(latestRev, Number(statValue(data, "latest_rev", 0)));
+    hasMore = shownCount < itemTotal;
     updateListStatus();
   } catch (error) {
     /* 下一轮再试 */
   }
 }
 
+/* ── 详情 dialog ── */
 function openDetail(key) {
   const item = cache.get(key);
   if (!item) return;
@@ -643,29 +1014,31 @@ function showLanguage(language) {
 
 async function saveDetail() {
   if (!detail) return;
-
-  const response = await fetch("/api/item/update", {
-    method: "POST",
-    headers: await auth(),
-    body: JSON.stringify({ id: detail.id, zh: $("#detail-edit").value }),
-  });
-
-  if (!response.ok) return alert("保存失败");
-  detail.zh = $("#detail-edit").value;
+  const zh = $("#detail-edit").value;
+  try {
+    await apiPost("/api/item/update", { id: detail.id, zh });
+  } catch (error) {
+    return reportError(error, "保存失败");
+  }
+  detail.zh = zh;
+  detail.rev = Number(detail.rev || 0) + 1;   // 本地也 +1，定时核对时对得上
   refreshItem(detail);
+  notify("译文已保存", "ok");
   $("#detail-dialog").close();
 }
 
 async function deleteDetail() {
-  if (!detail?.id) return alert("这条内容没有有效数据库 ID");
+  if (!detail) return;
+  if (detail.id === undefined || detail.id === null) {
+    return notify("这条内容没有有效数据库 ID，无法删除", "error");
+  }
   if (!confirm(`确定删除「${detail.account || "这条推文"}」吗？删除后不可恢复。`)) return;
 
-  const response = await fetch("/api/item/delete", {
-    method: "POST",
-    headers: await auth(),
-    body: JSON.stringify({ id: detail.id }),
-  });
-  if (!response.ok) return alert("删除失败，请检查看板权限或服务日志");
+  try {
+    await apiPost("/api/item/delete", { id: detail.id });
+  } catch (error) {
+    return reportError(error, "删除失败");
+  }
   const key = keyOf(detail);
   detail = null;
   removeItem(key);
@@ -673,39 +1046,64 @@ async function deleteDetail() {
 }
 
 async function toggleService(name) {
-  const response = await fetch("/api/service/toggle", {
-    method: "POST",
-    headers: await auth(),
-    body: JSON.stringify({
-      service: name,
-      enabled: !lastState.services?.[name]?.running,
-    }),
-  });
-  if (!response.ok) alert("操作失败");
+  const running = Boolean(lastState.services?.[name]?.running);
+  try {
+    await apiPost("/api/service/toggle", { service: name, enabled: !running });
+    notify(`${SERVICE_LABELS[name] || name}服务：${running ? "已停止" : "已启动"}`, "ok");
+  } catch (error) {
+    reportError(error, "操作失败");
+  }
 }
 
-async function openConfig(name) {
-  activeConfig = name;
-  const response = await fetch(`/api/service/config/${name}`, { headers: await auth() });
-  if (!response.ok) return alert("配置读取失败");
+/* ── 配置 dialog ── */
+/* 新接口是 {fields, env}；老接口字段直接带 value，还有 cookie_text。两边都认。 */
+function configFieldList(data) {
+  const env = (data && typeof data.env === "object" && data.env) ? data.env : {};
+  const raw = Array.isArray(data?.fields) ? data.fields : [];
+  const list = raw.map((field) => {
+    if (typeof field === "string") {
+      return { key: field, value: env[field] ?? "", secret: false, choices: [], hint: "" };
+    }
+    const key = String(field.key || field.name || "");
+    const value = field.value !== undefined && field.value !== null
+      ? field.value
+      : (env[key] ?? "");
+    return {
+      key,
+      value,
+      secret: Boolean(field.secret),
+      choices: Array.isArray(field.choices) ? field.choices : [],
+      hint: String(field.hint || field.tip || field.help || ""),
+    };
+  }).filter((field) => field.key);
 
-  const data = await response.json();
-  $("#config-title").textContent = `${name === "collect" ? "采集" : name === "process" ? "处理" : "分发"}服务配置`;
-  const cookieField = name === "collect" ? `
+  if (list.length) return list;
+  return Object.keys(env).map((key) => ({
+    key, value: env[key], secret: false, choices: [], hint: "",
+  }));
+}
+
+function renderConfigFields(data) {
+  const fields = configFieldList(data);
+  const cookieField = activeConfig === "collect" ? `
     <div class="config-field cookie-field">
       ${fieldLabel("X Cookies", "可粘贴 Header String、JSON 或 Netscape cookies.txt；保存后会写入 data/state/x_cookies.txt，并自动更新 COOKIES_PATH。")}
-      <textarea id="cookie-content" class="cookie-textarea" placeholder="直接粘贴 Cookie 内容">${esc(data.cookie_text || "")}</textarea>
-      <input id="cookie-file" type="file" accept=".txt,.json,text/plain,application/json">
+      <textarea id="cookie-content" class="cookie-textarea" placeholder="直接粘贴 Cookie 内容">${esc(data?.cookie_text || "")}</textarea>
+      <div class="cookie-tools">
+        <input id="cookie-file" type="file" accept=".txt,.json,text/plain,application/json">
+      </div>
     </div>` : "";
-  $("#config-fields").innerHTML = (data.fields || []).map((field) => `
+
+  $("#config-fields").innerHTML = fields.map((field) => `
     <div class="config-field">
-      ${fieldLabel(field.key, hints[field.key] || "")}
+      ${fieldLabel(field.key, hints[field.key] || field.hint || "")}
       ${fieldControl(field)}
     </div>
   `).join("") + cookieField;
 
-  if (name === "collect") {
-    $("#cookie-file").onchange = (event) => {
+  const fileInput = $("#cookie-file");
+  if (fileInput) {
+    fileInput.onchange = (event) => {
       const file = event.target.files?.[0];
       if (!file) return;
       const reader = new FileReader();
@@ -713,37 +1111,320 @@ async function openConfig(name) {
       reader.readAsText(file, "utf-8");
     };
   }
+}
 
+async function openConfig(name) {
+  activeConfig = name;
+  $("#config-title").textContent = `${SERVICE_LABELS[name] || name}服务配置`;
+  try {
+    const data = await apiGet(`/api/config/${encodeURIComponent(name)}`);
+    renderConfigFields(data || {});
+  } catch (error) {
+    return reportError(error, "配置读取失败");
+  }
   $("#config-dialog").showModal();
 }
 
 async function saveConfig() {
+  if (!activeConfig) return;
   const values = {};
   document.querySelectorAll("#config-fields [data-key]").forEach((field) => {
     if (field.value.trim()) values[field.dataset.key] = field.value.trim();
   });
+  const cookieContent = $("#cookie-content")?.value.trim() || "";
 
-  const response = await fetch("/api/service/config", {
-    method: "POST",
-    headers: await auth(),
-    body: JSON.stringify({ service: activeConfig, values }),
-  });
-
-  if (!response.ok) return alert("配置保存失败");
-  if (activeConfig === "collect") {
-    const content = $("#cookie-content")?.value.trim();
-    if (content) {
-      const cookieResponse = await fetch("/api/cookies/import", {
-        method: "POST",
-        headers: await auth(),
-        body: JSON.stringify({ content }),
-      });
-      if (!cookieResponse.ok) return alert("Cookie 导入失败，请检查格式");
+  try {
+    await apiPost("/api/config", { service: activeConfig, values });
+    if (activeConfig === "collect" && cookieContent) {
+      await apiPost("/api/cookies/import", { content: cookieContent });
     }
+  } catch (error) {
+    return reportError(error, "配置保存失败");
   }
+  notify("配置已保存", "ok");
   $("#config-dialog").close();
 }
 
+/* ── 艾莉森 QQ Bot：独立配置弹窗；刷新时绝不重绘正在编辑的表单 ── */
+const ALISON_KEYS = ["APPID", "SECRET", "SANDBOX", "ALISON_WITH_IMAGE", "ALISON_DISCOVER_GROUPS"];
+const ALISON_NOTE = "群消息会自动登记群。未 @ 的普通消息需在每个 QQ 群的机器人设置开启「获取群内全部消息」并确认具备全量事件权限；未开启时仍可由入群或 @ 消息发现。";
+let alisonSession = 0;
+let alisonPoll = null;
+let alisonBusy = false;
+let alisonLoading = false;
+const alisonGroupBusy = new Set();
+
+function alisonBool(value) {
+  return value === true || value === 1 || value === "1" || String(value).toLowerCase() === "true";
+}
+
+function alisonStatus(id, text, error = false) {
+  const element = $(id);
+  element.textContent = text;
+  element.classList.toggle("alison-error", error);
+}
+
+function alisonError(error, fallback) {
+  // A server error might echo request bodies (including SECRET). Never display it here.
+  alisonStatus("#alison-load-state", fallback, true);
+}
+
+function fillAlisonFields(fields) {
+  const byKey = new Map((Array.isArray(fields) ? fields : []).map(field => [field.key, field]));
+  const form = $("#alison-form");
+  for (const key of ALISON_KEYS) {
+    const control = form.elements.namedItem(key);
+    const field = byKey.get(key);
+    if (!control) continue;
+    const value = field?.value ?? "";
+    if (control.type === "checkbox") control.checked = alisonBool(value);
+    else if (key === "SANDBOX") control.value = alisonBool(value) ? "true" : "false";
+    else control.value = String(value);
+  }
+  const sandbox = byKey.get("SANDBOX");
+  const select = $("#alison-sandbox");
+  // Use the backend's canonical value when it offers explicit choices.
+  if (Array.isArray(sandbox?.choices) && sandbox.choices.length) {
+    select.innerHTML = sandbox.choices.map(choice => {
+      const value = String(choice);
+      const label = alisonBool(value) ? "沙箱环境" : (value === "false" || value === "0" ? "正式环境" : value);
+      return `<option value="${esc(value)}">${esc(label)}</option>`;
+    }).join("");
+    select.value = String(sandbox.value ?? "");
+    if (select.selectedIndex < 0) select.value = alisonBool(sandbox.value) ? "true" : "false";
+  } else {
+    select.innerHTML = '<option value="false">正式环境</option><option value="true">沙箱环境</option>';
+    select.value = alisonBool(sandbox?.value) ? "true" : "false";
+  }
+}
+
+function alisonTags(value) {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (!value) return [];
+  if (typeof value === "string") {
+    try { const parsed = JSON.parse(value); if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean); }
+    catch (_) { /* comma-delimited text is also accepted */ }
+    return value.split(/[,，]/).map(tag => tag.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function alisonGroupCard(group) {
+  const id = String(group.group_openid ?? "");
+  const member = alisonBool(group.is_member);
+  const memberLabel = !member ? "已退群" : (!group.last_checked && !group.joined_at ? "已登记 · 待核实" : "已加入");
+  const enabled = alisonBool(group.push_enabled);
+  const tags = alisonTags(group.group_tags);
+  return `<article class="alison-group-card">
+    <div class="alison-group-top"><div class="alison-group-identity"><h4>${esc(group.group_name || "未命名群")}</h4><code>${esc(id)}</code></div>
+      <label class="alison-group-toggle"><span>推送${enabled ? "已开启" : "已关闭"}</span><input type="checkbox" role="switch" data-alison-group="${esc(id)}" ${enabled ? "checked" : ""} ${alisonGroupBusy.has(id) ? "disabled" : ""} aria-label="${esc(group.group_name || id)} 推送" /></label></div>
+    <div class="alison-group-info">${group.group_finger_memo ? `<p>${esc(group.group_finger_memo)}</p>` : ""}
+      <div class="alison-group-tags">${group.group_class_text ? `<span>${esc(group.group_class_text)}</span>` : ""}${tags.map(tag => `<span>${esc(tag)}</span>`).join("")}</div>
+      <div class="alison-group-meta"><span>人数 ${group.group_member_num === null || group.group_member_num === undefined || group.group_member_num === "" ? "—" : esc(group.group_member_num)}</span><span>成员状态：${memberLabel}</span><span>加入时间：${esc(formatTime(group.joined_at))}</span><span>上次检查：${esc(formatTime(group.last_checked))}</span></div>
+      ${group.last_error ? `<p class="alison-group-error">检查错误：${esc(group.last_error)}</p>` : ""}</div>
+    </article>`;
+}
+
+function renderAlisonGroups(groups) {
+  const list = Array.isArray(groups) ? groups : [];
+  $("#alison-group-count").textContent = `(${list.length})`;
+  $("#alison-groups-list").innerHTML = list.length
+    ? list.map(alisonGroupCard).join("")
+    : '<p class="alison-empty">还没有已知群。等待入群事件自动发现，或在下方填写 group_openid 手动添加。</p>';
+}
+
+function renderAlisonRefresh(refresh) {
+  const state = refresh || {};
+  const running = alisonBool(state.running);
+  const progress = $("#alison-progress");
+  const errorCount = Number(state.error || 0);
+  const total = Number(state.total || 0);
+  const done = Number(state.done || 0);
+  progress.hidden = !running && !total && !errorCount;
+  progress.classList.toggle("alison-error", Boolean(errorCount));
+  progress.textContent = `${running ? "正在刷新" : "刷新完成"}：${done} / ${total}${errorCount ? ` · 错误 ${errorCount}` : ""}${state.message ? ` · ${state.message}` : ""}`;
+  $("#alison-refresh").disabled = running || alisonBusy;
+  if (running) scheduleAlisonPoll();
+  else stopAlisonPoll();
+}
+
+function stopAlisonPoll() {
+  if (alisonPoll) clearTimeout(alisonPoll);
+  alisonPoll = null;
+}
+function scheduleAlisonPoll() {
+  if (alisonPoll || !$("#alison-dialog").open) return;
+  const session = alisonSession;
+  alisonPoll = setTimeout(async () => {
+    alisonPoll = null;
+    if (session !== alisonSession || !$("#alison-dialog").open) return;
+    try {
+      const data = await apiGet("/api/config/alison");
+      if (session !== alisonSession || !$("#alison-dialog").open) return;
+      // Poll only the directory and progress. Form controls retain unsaved edits.
+      renderAlisonGroups(data?.groups);
+      renderAlisonRefresh(data?.refresh);
+    } catch (_) {
+      if (session !== alisonSession || !$("#alison-dialog").open) return;
+      alisonStatus("#alison-load-state", "群信息轮询失败，稍后重试。", true);
+      scheduleAlisonPoll();
+    }
+  }, 2000);
+}
+
+async function openAlison() {
+  const dialog = $("#alison-dialog");
+  if (dialog.open) return;
+  const session = ++alisonSession;
+  alisonLoading = true;
+  $("#alison-content").hidden = true;
+  alisonStatus("#alison-load-state", "正在读取配置…");
+  alisonStatus("#alison-save-state", "");
+  alisonStatus("#alison-add-state", "");
+  dialog.showModal();
+  $("#alison-close").focus();
+  try {
+    const data = await apiGet("/api/config/alison");
+    if (session !== alisonSession || !dialog.open) return;
+    fillAlisonFields(data?.fields);
+    renderAlisonGroups(data?.groups);
+    $("#alison-discovery-note").textContent = data?.discovery_note || ALISON_NOTE;
+    $("#alison-content").hidden = false;
+    alisonStatus("#alison-load-state", "");
+    renderAlisonRefresh(data?.refresh);
+  } catch (_) {
+    if (session === alisonSession && dialog.open) alisonError(null, "配置读取失败，请关闭后重试。");
+  } finally { if (session === alisonSession) alisonLoading = false; }
+}
+
+function closeAlison() {
+  const dialog = $("#alison-dialog");
+  if (!dialog.open || dialog.classList.contains("is-closing")) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    dialog.close();
+    return;
+  }
+  dialog.classList.add("is-closing");
+  window.setTimeout(() => {
+    dialog.classList.remove("is-closing");
+    if (dialog.open) dialog.close();
+  }, 160);
+}
+$("#alison-dialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeAlison();
+});
+$("#alison-dialog").addEventListener("close", () => {
+  $("#alison-dialog").classList.remove("is-closing");
+  ++alisonSession;
+  stopAlisonPoll();
+});
+$("#alison-dialog").addEventListener("mousedown", event => {
+  if (event.target === event.currentTarget) event.currentTarget.dataset.backdropPress = "1";
+});
+$("#alison-dialog").addEventListener("click", event => {
+  const dialog = event.currentTarget;
+  if (event.target === dialog && dialog.dataset.backdropPress === "1") closeAlison();
+  delete dialog.dataset.backdropPress;
+});
+
+$("#alison-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (alisonBusy || alisonLoading) return;
+  const form = event.currentTarget;
+  const values = {};
+  for (const key of ALISON_KEYS) {
+    const control = form.elements.namedItem(key);
+    values[key] = control.type === "checkbox" ? control.checked : control.value.trim();
+  }
+  const session = alisonSession;
+  alisonBusy = true;
+  $("#alison-save").disabled = true;
+  alisonStatus("#alison-save-state", "正在保存…");
+  try {
+    await apiPost("/api/config/alison", { values });
+    if (session === alisonSession) alisonStatus("#alison-save-state", "配置已保存");
+  } catch (_) {
+    if (session === alisonSession) alisonStatus("#alison-save-state", "保存失败，请重试。", true);
+  } finally {
+    alisonBusy = false;
+    $("#alison-save").disabled = false;
+  }
+});
+
+$("#alison-add-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = $("#alison-group-openid");
+  const group_openid = input.value.trim();
+  if (!group_openid || $("#alison-add").disabled) return;
+  const session = alisonSession;
+  $("#alison-add").disabled = true;
+  alisonStatus("#alison-add-state", "正在添加…");
+  try {
+    const data = await apiPost("/api/config/alison/groups/add", { group_openid });
+    if (session !== alisonSession) return;
+    const existing = Array.from($("#alison-groups-list").querySelectorAll("[data-alison-group]"))
+      .map(toggle => toggle.closest(".alison-group-card"));
+    if (data?.group) {
+      const duplicate = existing.some(card => card.querySelector("[data-alison-group]")?.dataset.alisonGroup === group_openid);
+      if (!duplicate) {
+        if (!existing.length) $("#alison-groups-list").innerHTML = "";
+        $("#alison-groups-list").insertAdjacentHTML("afterbegin", alisonGroupCard(data.group));
+        $("#alison-group-count").textContent = `(${existing.length + 1})`;
+      }
+    }
+    input.value = "";
+    alisonStatus("#alison-add-state", "群已添加");
+  } catch (_) {
+    if (session === alisonSession) alisonStatus("#alison-add-state", "添加失败，请检查 OpenID 后重试。", true);
+  } finally { $("#alison-add").disabled = false; }
+});
+
+$("#alison-groups-list").addEventListener("change", async event => {
+  const control = event.target.closest("[data-alison-group]");
+  if (!control) return;
+  const group_openid = control.dataset.alisonGroup;
+  const enabled = control.checked;
+  const session = alisonSession;
+  alisonGroupBusy.add(group_openid);
+  control.disabled = true;
+  try {
+    const data = await apiPost("/api/config/alison/groups/toggle", { group_openid, enabled });
+    if (session !== alisonSession) return;
+    control.closest(".alison-group-card").outerHTML = alisonGroupCard(data?.group || { group_openid, push_enabled: enabled });
+  } catch (_) {
+    if (session === alisonSession) {
+      control.checked = !enabled;
+      alisonStatus("#alison-add-state", "群推送设置失败，请重试。", true);
+    }
+  } finally {
+    alisonGroupBusy.delete(group_openid);
+    const current = Array.from($("#alison-groups-list").querySelectorAll("[data-alison-group]"))
+      .find(toggle => toggle.dataset.alisonGroup === group_openid);
+    if (current) current.disabled = false;
+  }
+});
+
+$("#alison-refresh").addEventListener("click", async () => {
+  if (alisonBusy) return;
+  const session = alisonSession;
+  alisonBusy = true;
+  $("#alison-refresh").disabled = true;
+  alisonStatus("#alison-load-state", "正在启动群信息刷新…");
+  try {
+    const data = await apiPost("/api/config/alison/groups/refresh", {});
+    if (session !== alisonSession) return;
+    alisonStatus("#alison-load-state", "");
+    renderAlisonRefresh(data?.refresh);
+  } catch (_) {
+    if (session === alisonSession) alisonStatus("#alison-load-state", "群信息刷新失败，请重试。", true);
+  } finally {
+    alisonBusy = false;
+    if (session === alisonSession && !alisonPoll) $("#alison-refresh").disabled = false;
+  }
+});
+
+/* ── 事件委托 ── */
 document.addEventListener("click", (event) => {
   const detailDialog = $("#detail-dialog");
   const detailButton = event.target.closest("[data-detail]");
@@ -754,6 +1435,16 @@ document.addEventListener("click", (event) => {
 
   const sourceLink = event.target.closest(".source-url");
   if (sourceLink) event.stopPropagation();
+
+  const tabButton = event.target.closest("[data-tab]");
+  if (tabButton) switchTab(tabButton.dataset.tab);
+
+  const channelConfigButton = event.target.closest("[data-channel-config='alison']");
+  if (channelConfigButton) openAlison();
+  if (event.target.id === "alison-close") closeAlison();
+
+  const channelButton = event.target.closest("[data-channel-toggle]");
+  if (channelButton) toggleChannel(channelButton.getAttribute("data-channel-toggle"));
 
   const languageButton = event.target.closest("[data-lang]");
   if (languageButton) showLanguage(languageButton.dataset.lang);
@@ -784,6 +1475,8 @@ document.addEventListener("click", (event) => {
   if (event.target.id === "detail-delete") deleteDetail();
   if (event.target.id === "config-close" || event.target.id === "config-cancel") $("#config-dialog").close();
   if (event.target.id === "config-save") saveConfig();
+  if (event.target.id === "load-more") loadMore();
+  if (event.target.id === "pushes-refresh") loadPushes();
 
   // Click on the backdrop (the <dialog> element itself is the outside area)
   // closes the read-only detail view. Tracked from mouseup so that a text
@@ -806,21 +1499,38 @@ document.addEventListener("keydown", (event) => {
 window.addEventListener("scroll", placeHintTip, true);
 window.addEventListener("resize", placeHintTip);
 
+/* ── 启动 ── */
 loadAll();
+
 const eventStream = new EventSource("/api/stream");
-eventStream.onmessage = (event) => {
-  const state = JSON.parse(event.data);
-  renderSummary(state);
+function onStreamState(event) {
+  let state = null;
+  try {
+    state = JSON.parse(event.data);
+  } catch (error) {
+    return;
+  }
+  applyState(state);
   // 采集/翻译写库都会让 latest_rev / latest_id 变大 → 立刻拉增量补丁（约 1 秒内上屏）
-  if (Number(state.latest_rev || 0) > latestRev || Number(state.latest_id || 0) > latestId) {
+  if (Number(statValue(state, "latest_rev", 0)) > latestRev
+      || Number(statValue(state, "latest_id", 0)) > latestId) {
     pullChanges();
   }
   updateListStatus();
-};
+}
+eventStream.addEventListener("state", onStreamState);   // 协议是 event: state
+eventStream.onmessage = onStreamState;                  // 万一没带 event 名也能收
+eventStream.onopen = () => setConnection(true);
+eventStream.onerror = () => setConnection(false);
+
 /* SSE 丢了事件也不怕：定时把"最新 ~ 当前显示的这一段"重新核对一遍 */
 setInterval(reconcile, RECONCILE_MS);
+/* 分发 tab 打开时，定时刷新渠道状态与最近分发记录 */
+setInterval(() => {
+  if (activeTab !== "distribute") return;
+  refreshChannels(true);
+  loadPushes(true);
+}, PUSHES_MS);
+
 window.addEventListener("scroll", maybeLoadMore, { passive: true });
 window.addEventListener("resize", maybeLoadMore);
-document.addEventListener("click", (event) => {
-  if (event.target.id === "load-more") loadMore();
-});

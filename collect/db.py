@@ -3,7 +3,7 @@
 import json, sqlite3
 from datetime import datetime
 from collect.paths import DB_FILE
-SCHEMA='''CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY,platform TEXT DEFAULT '',source TEXT DEFAULT '',origin_id TEXT,dedup_key TEXT UNIQUE,account TEXT,orig_account TEXT,forward_comment TEXT,quoted_account TEXT DEFAULT '',quoted_raw TEXT DEFAULT '',quoted_zh TEXT DEFAULT '',quoted_url TEXT DEFAULT '',ts INTEGER,date TEXT,content_type TEXT,raw TEXT,zh TEXT DEFAULT '',ai_tags TEXT DEFAULT '',is_news INTEGER,not_repeat INTEGER,not_comment INTEGER,not_sensitive INTEGER,repeat_of TEXT DEFAULT '',ai_title TEXT DEFAULT '',ai_summary TEXT DEFAULT '',importance TEXT DEFAULT '',meta_attempts INTEGER DEFAULT 0,meta_error TEXT DEFAULT '',translate_attempts INTEGER DEFAULT 0,translate_error TEXT DEFAULT '',translated_at TEXT DEFAULT '',ori_url TEXT,images TEXT DEFAULT '[]',decision TEXT,reason TEXT,stage TEXT DEFAULT 'collected',collected_at TEXT,processed_at TEXT,rev INTEGER DEFAULT 1,ai_score INTEGER,rules_score INTEGER);CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT);'''
+SCHEMA='''CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY,platform TEXT DEFAULT '',source TEXT DEFAULT '',origin_id TEXT,dedup_key TEXT UNIQUE,account TEXT,orig_account TEXT,forward_comment TEXT,quoted_account TEXT DEFAULT '',quoted_raw TEXT DEFAULT '',quoted_zh TEXT DEFAULT '',quoted_url TEXT DEFAULT '',ts INTEGER,date TEXT,content_type TEXT,raw TEXT,zh TEXT DEFAULT '',ai_tags TEXT DEFAULT '',is_news INTEGER,not_repeat INTEGER,not_comment INTEGER,not_sensitive INTEGER,repeat_of TEXT DEFAULT '',ai_title TEXT DEFAULT '',ai_summary TEXT DEFAULT '',importance TEXT DEFAULT '',meta_attempts INTEGER DEFAULT 0,meta_error TEXT DEFAULT '',translate_attempts INTEGER DEFAULT 0,translate_error TEXT DEFAULT '',translated_at TEXT DEFAULT '',ori_url TEXT,images TEXT DEFAULT '[]',decision TEXT,reason TEXT,stage TEXT DEFAULT 'collected',collected_at TEXT,processed_at TEXT,rev INTEGER DEFAULT 1,ai_score INTEGER,rules_score INTEGER,pushed TEXT DEFAULT '{}');CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT);CREATE TABLE IF NOT EXISTS pushes(id INTEGER PRIMARY KEY,item_id INTEGER,channel TEXT DEFAULT '',kind TEXT DEFAULT '',source TEXT,sent_at TEXT,UNIQUE(source,item_id));CREATE TABLE IF NOT EXISTS channels(id TEXT PRIMARY KEY,label TEXT DEFAULT '',adapter TEXT DEFAULT 'plugin',command TEXT DEFAULT '',enabled INTEGER DEFAULT 1,targets TEXT DEFAULT '[]',last_seen TEXT DEFAULT '',note TEXT DEFAULT '');CREATE TABLE IF NOT EXISTS alison_groups(group_openid TEXT PRIMARY KEY,group_name TEXT DEFAULT '',group_finger_memo TEXT DEFAULT '',group_class_text TEXT DEFAULT '',group_tags TEXT DEFAULT '[]',group_member_num INTEGER,joined_at TEXT DEFAULT '',is_member INTEGER DEFAULT 1,push_enabled INTEGER DEFAULT 0,last_checked TEXT DEFAULT '',last_error TEXT DEFAULT '',updated_at TEXT DEFAULT '');'''
 
 # 已删除的旧列（这里列出来是为了"别再被加回来"）：tweet_id / score / labels / final_decision，
 # 以及旧版遗留的 published_ts / published_date / title / url / has_media。
@@ -26,7 +26,11 @@ def _ensure_columns(c):
             #   quoted_zh 被引用原文的译文（翻译阶段填）/ quoted_url 被引用推文链接
             # 有引用的条目在 translate_db 里会把 not_comment 强制判绿，见那里的注释。
             'quoted_account':"TEXT DEFAULT ''",'quoted_raw':"TEXT DEFAULT ''",
-            'quoted_zh':"TEXT DEFAULT ''",'quoted_url':"TEXT DEFAULT ''"}
+            'quoted_zh':"TEXT DEFAULT ''",'quoted_url':"TEXT DEFAULT ''",
+            # pushed：分发状态。{"通道:目标": true} —— 谁发过就置 true，见 distribute/push_db.py。
+            # 待推送队列不再是 JSON 文件：decision='发' 且 pushed 里自己的 source 不是 true，
+            # 就是"这条该由我发"。新 source（新群/新通道）注册时回填到已有行上。
+            'pushed':"TEXT DEFAULT '{}'"}
  for name,kind in additions.items():
   if name not in existing: c.execute(f'ALTER TABLE items ADD COLUMN {name} {kind}')
 def ensure_schema(c):

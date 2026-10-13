@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""看板托管的服务循环。分发只观察队列，绝不自动触发 QQ 发送。"""
+"""看板托管的服务循环（只跑"采集"和"处理"两个循环）。
+=====================================================
+分发**不再是一个服务**：它是若干"渠道"（麦麦插件 / 艾莉森 / NapCat），各自连看板的
+渠道 WebSocket，由 `dashboard/channels.py` 调度、看板"分发"页启停。见 dashboard/PROTOCOL.md。
+"""
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -52,17 +55,9 @@ def run_command(name: str) -> int:
 
 def main() -> None:
     name = sys.argv[1] if len(sys.argv) > 1 else ""
-    if name not in {"collect", "process", "distribute"}:
-        raise SystemExit("usage: service_runner.py collect|process|distribute")
-    if name == "distribute":
-        queue = ROOT / "data" / "queue" / "待推送.json"
-        while True:
-            try:
-                rows = json.loads(queue.read_text(encoding="utf-8")) if queue.exists() else []
-                print(f"[distribute] 队列 {len(rows) if isinstance(rows, list) else 0} 条；默认不执行真实发送", flush=True)
-            except Exception as exc:
-                print(f"[distribute] 队列读取失败: {exc}", flush=True)
-            time.sleep(10)
+    if name not in {"collect", "process"}:
+        raise SystemExit("usage: service_runner.py collect|process"
+                         "（分发已改为渠道，见 dashboard/PROTOCOL.md）")
     while True:
         run_command(name)
         time.sleep(configured_interval(name))

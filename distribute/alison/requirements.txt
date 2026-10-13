@@ -1,1 +1,4 @@
-qq-botpy
+# BotPy 1.2.1 is vendored in ./botpy; retain only its runtime dependencies.
+aiohttp>=3.7.4,<4
+PyYAML
+APScheduler

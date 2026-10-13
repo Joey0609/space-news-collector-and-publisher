@@ -10,44 +10,54 @@
 
 <body>
     <header class="topbar">
-        <div><span class="product-mark">78-UMA</span>
+        <div class="topbar__brand"><span class="product-mark">78-UMA</span>
             <h1>航小麦</h1>
-        </div><span id="updated" class="updated">正在连接</span>
+        </div>
+        <nav class="tabs" role="tablist" aria-label="视图切换">
+            <button type="button" role="tab" data-tab="process" class="active" aria-selected="true">处理</button>
+            <button type="button" role="tab" data-tab="distribute" aria-selected="false">分发</button>
+        </nav>
+        <div class="topbar__status"><span id="conn" class="conn conn-idle">正在连接</span><span id="updated"
+                class="updated">—</span></div>
     </header>
     <main>
-        <section class="services">
-            <article class="service-card">
-                <div class="service-card__head"><span class="service-icon">采</span>
-                    <div>
-                        <h2>采集服务</h2>
-                        <p id="collect-state">—</p>
+        <section id="view-process" class="view" role="tabpanel" aria-label="处理">
+            <section class="services">
+                <article class="service-card">
+                    <div class="service-card__head"><span class="service-icon">采</span>
+                        <div>
+                            <h2>采集服务</h2>
+                            <p id="collect-state">—</p>
+                        </div>
                     </div>
-                </div>
-                <div class="actions"><button data-service="collect">启动</button><button class="secondary"
-                        data-config="collect">配置</button></div>
-            </article>
-            <article class="service-card">
-                <div class="service-card__head"><span class="service-icon">处</span>
-                    <div>
-                        <h2>处理服务</h2>
-                        <p id="process-state">—</p>
+                    <div class="actions"><button data-service="collect">启动</button><button class="secondary"
+                            data-config="collect">配置</button></div>
+                </article>
+                <article class="service-card">
+                    <div class="service-card__head"><span class="service-icon">处</span>
+                        <div>
+                            <h2>处理服务</h2>
+                            <p id="process-state">—</p>
+                        </div>
                     </div>
-                </div>
-                <div class="actions"><button data-service="process">启动</button><button class="secondary"
-                        data-config="process">配置</button></div>
-            </article>
-            <article class="service-card">
-                <div class="service-card__head"><span class="service-icon">发</span>
-                    <div>
-                        <h2>分发服务</h2>
-                        <p id="distribute-state">—</p>
+                    <div class="actions"><button data-service="process">启动</button><button class="secondary"
+                            data-config="process">配置</button></div>
+                </article>
+                <article class="service-card summary-card">
+                    <div class="service-card__head"><span class="service-icon">摘</span>
+                        <div>
+                            <h2>运行摘要</h2>
+                            <p id="summary-state">—</p>
+                        </div>
                     </div>
-                </div>
-                <div class="actions"><button data-service="distribute">启动</button><button class="secondary"
-                        data-config="distribute">配置</button></div>
-            </article>
-        </section>
-        <section class="layout">
+                    <div class="summary-grid">
+                        <div class="summary-row"><span>待分发</span><b id="pending">0</b></div>
+                        <div class="summary-row"><span>渠道在线</span><b id="channel-online">0 / 0</b></div>
+                        <div class="summary-row"><span>环境配置</span><b id="env">—</b></div>
+                    </div>
+                    <div id="channel-brief" class="channel-brief"></div>
+                </article>
+            </section>
             <section class="panel content">
                 <div class="panel-title">
                     <div><span class="eyebrow">CONTENT</span>
@@ -67,11 +77,35 @@
                     <button id="load-more" class="secondary" hidden>加载更多</button>
                 </div>
             </section>
-            <aside class="panel summary"><span class="eyebrow">OVERVIEW</span>
-                <h2>运行摘要</h2>
-                <div class="summary-row"><span>待分发</span><b id="pending">0</b></div>
-                <div class="summary-row"><span>环境配置</span><b id="env">—</b></div>
-            </aside>
+        </section>
+        <section id="view-distribute" class="view" role="tabpanel" aria-label="分发" hidden>
+            <div class="section-head">
+                <div><span class="eyebrow">CHANNELS</span>
+                    <h2>分发渠道</h2>
+                </div>
+                <span id="channel-total" class="count">0</span>
+            </div>
+            <section id="channels" class="channels"></section>
+            <section class="panel pushes-panel">
+                <div class="panel-title">
+                    <div><span class="eyebrow">PUSHES</span>
+                        <h2>最近分发记录</h2>
+                    </div><button id="pushes-refresh" class="secondary" type="button">刷新</button>
+                </div>
+                <div class="table-wrap">
+                    <table class="pushes">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>渠道</th>
+                                <th>目标</th>
+                                <th>条目标题</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pushes-body"></tbody>
+                    </table>
+                </div>
+            </section>
         </section>
     </main>
     <dialog id="detail-dialog">
@@ -117,6 +151,38 @@
         <div id="config-fields" class="config-fields"></div>
         <div class="dialog-actions"><button id="config-cancel" class="secondary">取消</button><button
                 id="config-save">保存配置</button></div>
+    </dialog>
+    <dialog id="alison-dialog" class="alison-dialog" aria-labelledby="alison-title" aria-describedby="alison-intro">
+        <header class="alison-head">
+            <div><span class="eyebrow">QQ BOT / ALISON</span>
+                <h2 id="alison-title">艾莉森渠道配置</h2>
+                <p id="alison-intro">管理 QQ Bot 凭据、投递选项与已知群目录。</p>
+            </div>
+            <button id="alison-close" type="button" class="close" aria-label="关闭艾莉森配置">×</button>
+        </header>
+        <div class="alison-scroll">
+            <p id="alison-load-state" class="alison-message" role="status" aria-live="polite">正在读取配置…</p>
+            <div id="alison-content" hidden>
+                <form id="alison-form">
+                    <div class="alison-section-head"><div><span class="eyebrow">BOT SETTINGS</span><h3>机器人设置</h3></div></div>
+                    <div class="alison-fields">
+                        <label class="alison-field"><span>APPID</span><input name="APPID" type="text" autocomplete="off" spellcheck="false"></label>
+                        <label class="alison-field"><span>SECRET</span><input name="SECRET" type="text" autocomplete="off" spellcheck="false"></label>
+                        <label class="alison-field"><span>SANDBOX</span><select name="SANDBOX" id="alison-sandbox"><option value="false">正式环境</option><option value="true">沙箱环境</option></select></label>
+                        <label class="alison-switch-row"><span><strong>ALISON_WITH_IMAGE</strong><small>推送时附带图片</small></span><input name="ALISON_WITH_IMAGE" type="checkbox" role="switch"></label>
+                        <label class="alison-switch-row"><span><strong>ALISON_DISCOVER_GROUPS</strong><small>自动记录入/退群及可接收的群消息；发送始终使用 QQ 长连接</small></span><input name="ALISON_DISCOVER_GROUPS" type="checkbox" role="switch"></label>
+                    </div>
+                    <div class="alison-save-row"><span id="alison-save-state" role="status" aria-live="polite"></span><button id="alison-save" type="submit">保存机器人设置</button></div>
+                </form>
+                <section class="alison-groups" aria-labelledby="alison-groups-title">
+                    <div class="alison-section-head"><div><span class="eyebrow">KNOWN GROUPS</span><h3 id="alison-groups-title">已知群目录 <span id="alison-group-count"></span></h3></div><button id="alison-refresh" type="button" class="secondary">刷新群信息</button></div>
+                    <p id="alison-discovery-note" class="alison-note">收到群消息会自动登记新群；如需监听未 @ 的普通消息，请在每个 QQ 群的机器人设置开启「获取群内全部消息」并确认具备全量事件权限。</p>
+                    <div id="alison-progress" class="alison-progress" role="status" aria-live="polite" hidden></div>
+                    <div id="alison-groups-list" class="alison-groups-list"></div>
+                    <form id="alison-add-form" class="alison-add-form"><label for="alison-group-openid">手动添加群 OpenID</label><div><input id="alison-group-openid" name="group_openid" type="text" placeholder="输入 group_openid" autocomplete="off" spellcheck="false" required><button id="alison-add" type="submit" class="secondary">添加群</button></div><span id="alison-add-state" role="status" aria-live="polite"></span></form>
+                </section>
+            </div>
+        </div>
     </dialog>
     <script src="/app.js"></script>
 </body>

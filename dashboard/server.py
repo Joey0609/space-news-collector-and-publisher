@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import secrets
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -15,6 +16,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:      # 队列口径在 distribute/push_db.py（直接读 SQLite）
+    sys.path.insert(0, str(ROOT))
 DATA = ROOT / "data"
 STATE = DATA / "state"
 LOGS = ROOT / "logs"
@@ -22,14 +25,23 @@ WEB = ROOT / "dashboard" / "webui"
 TOKEN_FILE = STATE / "dashboard_token.txt"
 AUDIT = STATE / "audit.jsonl"
 COOKIE_FILE = STATE / "x_cookies.txt"
+# 待分发数直接问分发队列（SQLite：decision='发' 且还有 source 没发完），不再读 待推送.json
+from distribute.push_db import pending_count as queue_pending_count  # noqa: E402
+from dashboard import alison_config  # noqa: E402
+from dashboard import channels as channel_hub  # noqa: E402
+from dashboard.ws import ChannelWSServer  # noqa: E402
+
 LOCK = threading.Lock()
 PROCESSES: dict[str, subprocess.Popen] = {}
-SERVICE_NAMES = {"collect": "采集", "process": "处理", "distribute": "分发"}
+# 服务 = 看板固定托管的那两个循环；分发改为"渠道"（见 /api/channels 与 channels.py）
+SERVICE_NAMES = {"collect": "采集", "process": "处理"}
 CONFIG_FIELDS = {
     "collect": ["PROXY_URL", "COOKIES_PATH", "WATCH_ACCOUNT", "NEWS_ACCOUNTS", "SCAN_BATCH", "PAUSE_SECONDS", "COLLECT_INTERVAL_SECONDS"],
     "process": ["MODEL_PROTOCOL", "MODEL_API_BASE", "MODEL_NAME", "MODEL_API_KEY", "MODEL_TIMEOUT", "MODEL_MAX_TOKENS", "AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES", "TRANSLATE_RATE_LIMIT_WAIT", "TRANSLATE_PAUSE_SECONDS", "PROCESS_INTERVAL_SECONDS"],
-    "distribute": ["DISTRIBUTE_CHANNEL"],
 }
+CHANNEL_KEY_PREFIX = "channel:"
+WS_PORT = int(os.getenv("HX_WS_PORT", "") or 8788)
+WS_SERVER: ChannelWSServer | None = None
 SECRET_FIELDS = {"MODEL_API_KEY"}
 # 单选字段：看板前端会渲染成下拉框（只允许这三种协议）
 CHOICE_FIELDS = {
@@ -151,7 +163,8 @@ def service_config(name: str) -> dict:
             # 非空表示这是单选字段，前端渲染成下拉框
             "choices": CHOICE_FIELDS.get(key, []),
         })
-    result = {"service": name, "fields": fields}
+    result = {"service": name, "fields": fields, "env": {key: ("***" if key in SECRET_FIELDS else values.get(key, ""))
+                                                         for key in CONFIG_FIELDS[name]}}
     if name == "collect":
         result["cookie_text"] = COOKIE_FILE.read_text(encoding="utf-8") if COOKIE_FILE.exists() else ""
         result["cookie_path"] = str(COOKIE_FILE)
@@ -261,6 +274,7 @@ def item_stats() -> tuple[int, int, int]:
 
 
 def services() -> dict:
+    """采集/处理两个"服务"（分发不再是一个服务，而是一堆渠道，见 /api/channels）。"""
     result = {}
     with LOCK:
         for name, label in SERVICE_NAMES.items():
@@ -276,19 +290,59 @@ def services() -> dict:
     return result
 
 
-def summary() -> dict:
-    """轻量状态：不含条目正文，供 SSE 每秒推送与前端判断是否需要增量拉取。"""
-    pending = read_json(DATA / "queue" / "待推送.json", [])
+def channel_process_running(channel_id: str) -> bool:
+    with LOCK:
+        process = PROCESSES.get(channel_key(channel_id))
+        return bool(process and process.poll() is None)
+
+
+def state() -> dict:
+    """首屏/SSE 用的全量轻量状态：服务 + 渠道 + 统计（不含条目正文）。"""
+    try:
+        pending_total = queue_pending_count(sources=channel_hub.active_sources())
+    except Exception as exc:
+        print(f"[看板] 待分发统计失败: {exc}", flush=True)
+        pending_total = 0
     total, latest_id, latest_rev = item_stats()
+    try:
+        channel_list = channel_hub.list_channels()
+    except Exception as exc:
+        print(f"[看板] 渠道状态读取失败: {exc}", flush=True)
+        channel_list = []
+    for channel in channel_list:
+        if channel.get("adapter") == channel_hub.ADAPTER_PROCESS:
+            channel["running"] = channel_process_running(channel["id"])
     return {
         "services": services(),
-        "item_count": total,
-        "latest_id": latest_id,
-        "latest_rev": latest_rev,
-        "pending_count": len(pending) if isinstance(pending, list) else 0,
+        "channels": channel_list,
+        "stats": {
+            "item_count": total,
+            "latest_id": latest_id,
+            "latest_rev": latest_rev,
+            "pending_count": pending_total,
+        },
         "env_ready": (ROOT / ".env").exists(),
-        "configurable_services": list(CONFIG_FIELDS),
+        "configurable": list(CONFIG_FIELDS),
+        "ws_url": WS_SERVER.url if WS_SERVER is not None else f"ws://127.0.0.1:{WS_PORT}/ws",
         "ts": time.time(),
+    }
+
+
+def summary() -> dict:
+    """兼容老调用：老字段拍平在顶层（`/api/snapshot` 与 SSE 用）。"""
+    data = state()
+    stats = data["stats"]
+    return {
+        "services": data["services"],
+        "channels": data["channels"],
+        "item_count": stats["item_count"],
+        "latest_id": stats["latest_id"],
+        "latest_rev": stats["latest_rev"],
+        "pending_count": stats["pending_count"],
+        "env_ready": data["env_ready"],
+        "configurable_services": data["configurable"],
+        "ws_url": data["ws_url"],
+        "ts": data["ts"],
     }
 
 
@@ -310,7 +364,7 @@ def snapshot(offset: int = 0, limit: int = 20, since_id: int = 0, since_rev: int
 
 def pump_service_output(name: str, process: subprocess.Popen, log_stream) -> None:
     """Tee a managed service's combined output to the dashboard terminal and log file."""
-    label = SERVICE_NAMES.get(name, name)
+    label = label_for(name)
     try:
         if process.stdout is None:
             return
@@ -337,18 +391,33 @@ def pump_service_output(name: str, process: subprocess.Popen, log_stream) -> Non
         print(f"[{label}] 服务输出流已结束，退出码={process.poll()}", flush=True)
 
 
-def start_service(name: str) -> int:
-    if name not in SERVICE_NAMES:
-        raise ValueError("未知服务")
+def channel_key(channel_id: str) -> str:
+    """渠道进程在看板进程表里的键（和被托管的"服务"分开，互不覆盖）。"""
+    return f"{CHANNEL_KEY_PREFIX}{channel_id}"
+
+
+def label_for(key: str) -> str:
+    """日志里显示的名字：服务名 → 渠道显示名 → 原样。"""
+    if key in SERVICE_NAMES:
+        return SERVICE_NAMES[key]
+    if key.startswith(CHANNEL_KEY_PREFIX):
+        channel_id = key[len(CHANNEL_KEY_PREFIX):]
+        info = channel_hub.channel_row(channel_id)
+        return f"渠道:{info.get('label') or channel_id}"
+    return key
+
+
+def _spawn(key: str, command: list) -> int:
+    """起一个被看板托管的子进程（服务/渠道都走这里），返回 PID。"""
+    label = label_for(key)
     with LOCK:
-        existing = PROCESSES.get(name)
+        existing = PROCESSES.get(key)
         if existing and existing.poll() is None:
-            print(f"[{SERVICE_NAMES[name]}] 已在运行，PID={existing.pid}", flush=True)
+            print(f"[{label}] 已在运行，PID={existing.pid}", flush=True)
             return existing.pid
         LOGS.mkdir(parents=True, exist_ok=True)
-        log_stream = (LOGS / f"dashboard_{name}.log").open("a", encoding="utf-8")
-        command = [sys.executable, str(ROOT / "dashboard" / "service_runner.py"), name]
-        print(f"[{SERVICE_NAMES[name]}] 启动：{' '.join(command)}", flush=True)
+        log_stream = (LOGS / f"dashboard_{key.replace(':', '_')}.log").open("a", encoding="utf-8")
+        print(f"[{label}] 启动：{' '.join(command)}", flush=True)
         process = subprocess.Popen(
             command,
             cwd=ROOT,
@@ -363,15 +432,42 @@ def start_service(name: str) -> int:
             env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        PROCESSES[name] = process
+        PROCESSES[key] = process
         threading.Thread(
             target=pump_service_output,
-            args=(name, process, log_stream),
-            name=f"dashboard-output-{name}",
+            args=(key, process, log_stream),
+            name=f"dashboard-output-{key}",
             daemon=True,
         ).start()
-        audit("service_start", {"service": name, "pid": process.pid})
         return process.pid
+
+
+def start_service(name: str) -> int:
+    if name not in SERVICE_NAMES:
+        raise ValueError("未知服务")
+    pid = _spawn(name, [sys.executable, str(ROOT / "dashboard" / "service_runner.py"), name])
+    audit("service_start", {"service": name, "pid": pid})
+    return pid
+
+
+def start_channel_process(channel_id: str) -> int:
+    """托管渠道（adapter=process）：按 `channels.command` 起进程。"""
+    info = channel_hub.channel_row(channel_id)
+    if not info:
+        raise ValueError("未知渠道")
+    raw = str(info.get("command") or "").strip()
+    if not raw:
+        raise ValueError(f"渠道 {channel_id} 没有配置启动命令")
+    try:
+        command = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"渠道 {channel_id} 的启动命令不是合法 JSON：{exc}") from exc
+    if not isinstance(command, list) or not command:
+        raise ValueError(f"渠道 {channel_id} 的启动命令必须是 JSON 数组")
+    command = [str(sys.executable) if str(part) == "{python}" else str(part) for part in command]
+    pid = _spawn(channel_key(channel_id), command)
+    audit("channel_start", {"channel": channel_id, "pid": pid})
+    return pid
 
 
 def _taskkill(pid: int) -> str:
@@ -424,10 +520,10 @@ def _kill_tree(process) -> str:
             return f"killpg 失败({exc}) terminate 也失败({inner})"
 
 
-def stop_service(name: str) -> bool:
-    """停止服务：连同它正在跑的那一轮处理一起结束。"""
+def stop_process(key: str) -> bool:
+    """停掉一个被托管的进程（服务/渠道通用）：连同它正在跑的那一轮一起结束。"""
     with LOCK:
-        process = PROCESSES.get(name)
+        process = PROCESSES.get(key)
         running = bool(process and process.poll() is None)
     if not running or process is None:
         return False
@@ -440,21 +536,87 @@ def stop_service(name: str) -> bool:
             process.kill()
         except Exception:
             pass
-    print(f"[{SERVICE_NAMES.get(name, name)}] 已停止 PID={process.pid}（{detail}）", flush=True)
-    audit("service_stop", {"service": name, "pid": process.pid, "detail": detail})
+    print(f"[{label_for(key)}] 已停止 PID={process.pid}（{detail}）", flush=True)
+    audit("process_stop", {"key": key, "pid": process.pid, "detail": detail})
     return True
 
 
-class Handler(BaseHTTPRequestHandler):
-    server_version = "HXDashboard/2.0"
+def stop_service(name: str) -> bool:
+    """停止采集/处理服务。"""
+    return stop_process(name)
 
+
+def stop_channel_process(channel_id: str) -> bool:
+    """停止托管渠道进程（在线连接由 channel_hub.disconnect_channel 处理）。"""
+    return stop_process(channel_key(channel_id))
+
+
+def toggle_channel(channel_id: str, enabled: bool) -> dict:
+    """看板开关一个渠道。
+
+    - `adapter=plugin`（麦麦插件活在麦麦进程里）：只启用/停用推送 —— 库里置位 + 给在线连接发
+      `pause`/`resume`，进程仍由麦麦自己管。
+    - `adapter=process`（艾莉森这类看板托管进程）：真的启停进程，顺带置位。
+    """
+    info = channel_hub.channel_row(channel_id)
+    if not info:
+        raise ValueError(f"未知渠道 {channel_id!r}")
+    info = channel_hub.set_enabled(channel_id, enabled)
+    adapter = str(info.get("adapter") or channel_hub.ADAPTER_PLUGIN)
+    result = {"channel": channel_id, "enabled": enabled, "adapter": adapter}
+    if adapter == channel_hub.ADAPTER_PROCESS:
+        if enabled:
+            result["pid"] = start_channel_process(channel_id)
+            result["running"] = True
+        else:
+            channel_hub.disconnect_channel(channel_id, "看板停止")
+            stop_channel_process(channel_id)
+            result["running"] = False
+    audit("channel_toggle", {"channel": channel_id, "enabled": enabled, "adapter": adapter})
+    return result
+
+
+def update_item(payload: dict) -> None:
+    """看板手改条目（目前只允许改这几列；改译文后顺手清掉旧错误信息）。"""
+    item_id = int(payload.get("id"))
+    allowed = {"zh", "raw", "decision", "reason", "content_type", "ori_url"}
+    values = {key: payload[key] for key in allowed if key in payload}
+    if not values:
+        raise ValueError("没有可修改字段")
+    conn = sqlite3.connect(DATA / "hx.sqlite3")
+    try:
+        sets = ",".join(f"{key}=?" for key in values)
+        # 手改译文后清掉旧错误：留着它会被当成"还没翻译好"，下轮把人工改的覆盖掉
+        extra = ", translate_error=''" if "zh" in values else ""
+        conn.execute(
+            f"UPDATE items SET {sets}, processed_at=?, rev=COALESCE(rev,0)+1{extra} WHERE id=?",
+            list(values.values()) + [time.strftime("%Y-%m-%dT%H:%M:%S"), item_id])
+        conn.commit()
+    finally:
+        conn.close()
+    audit("item_update", {"id": item_id, "fields": sorted(values)})
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "HXDashboard/3.0"
+
+    # ────────────────────────── 响应（统一信封）──────────────────────────
     def send_json(self, code: int, data: dict) -> None:
         raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def ok(self, data=None, code: int = 200) -> None:
+        """成功：{"ok": true, "data": ...}。"""
+        self.send_json(code, {"ok": True, "data": data if data is not None else {}})
+
+    def fail(self, error, code: int = 400) -> None:
+        """失败：{"ok": false, "error": "人话"}。"""
+        self.send_json(code, {"ok": False, "error": str(error)})
 
     def send_file(self, target: Path, max_age: int = 0) -> None:
         """Send a file with validators so the browser can cache and revalidate it.
@@ -482,6 +644,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def send_sse(self) -> None:
+        """SSE：每秒一个 `event: state`，data 与 `/api/state` 的 data 相同。"""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -489,8 +652,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         for _ in range(120):
             try:
-                payload = json.dumps(summary(), ensure_ascii=False)
-                self.wfile.write(("data: " + payload + "\n\n").encode("utf-8"))
+                payload = json.dumps(state(), ensure_ascii=False)
+                self.wfile.write(f"event: state\ndata: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
                 time.sleep(1)
             except Exception:
@@ -507,99 +670,133 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return default
 
+    # ────────────────────────── GET 路由 ──────────────────────────
     def do_GET(self) -> None:
-        if self.path.startswith("/api/snapshot"):
-            return self.send_json(200, snapshot(
-                offset=self.query_int("offset", 0),
-                limit=self.query_int("limit", 20) or 20,
-                since_id=self.query_int("since_id", 0),
-                since_rev=self.query_int("since_rev", 0),
-            ))
-        if self.path.startswith("/api/items"):
-            return self.send_json(200, {
-                "items": all_items(self.query_int("offset", 0), self.query_int("limit", 20) or 20),
-                "offset": self.query_int("offset", 0),
-                "limit": self.query_int("limit", 20) or 20,
-            })
-        if self.path == "/api/stream":
-            return self.send_sse()
-        if self.path.startswith("/api/image/"):
-            raw = unquote(self.path.split("/api/image/", 1)[1].split("?", 1)[0])
-            image_root = (DATA / "images").resolve()
-            target = (image_root / raw.replace("\\", "/")).resolve()
-            if image_root not in target.parents or not target.is_file():
-                return self.send_json(404, {"error": "image not found"})
-            return self.send_file(target, max_age=604800)
-        if self.path.startswith("/api/service/config/"):
-            if not self.auth():
-                return self.send_json(401, {"error": "invalid token"})
-            try:
-                return self.send_json(200, service_config(self.path.rsplit("/", 1)[-1]))
-            except Exception as exc:
-                return self.send_json(400, {"error": str(exc)})
         path = self.path.split("?", 1)[0]
+        try:
+            if path == "/api/state":
+                return self.ok(state())
+            if path == "/api/snapshot":
+                return self.ok(snapshot(
+                    offset=self.query_int("offset", 0),
+                    limit=self.query_int("limit", 20) or 20,
+                    since_id=self.query_int("since_id", 0),
+                    since_rev=self.query_int("since_rev", 0),
+                ))
+            if path == "/api/items":
+                offset, limit = self.query_int("offset", 0), self.query_int("limit", 20) or 20
+                return self.ok({"items": all_items(offset, limit), "offset": offset,
+                                "limit": limit, "total": item_stats()[0]})
+            if path == "/api/channels":
+                return self.ok({"channels": state()["channels"]})
+            if path == "/api/channels/endpoint":
+                if not self.auth():
+                    return self.fail("invalid token", 401)
+                return self.ok({
+                    "ws_url": WS_SERVER.url if WS_SERVER is not None else f"ws://127.0.0.1:{WS_PORT}/ws",
+                    "host": "127.0.0.1",
+                    "port": WS_PORT,
+                    "token": token(),
+                    "protocol": 1,
+                })
+            if path == "/api/pushes":
+                return self.ok({"pushes": channel_hub.recent_pushes(self.query_int("limit", 20) or 20)})
+            if path == "/api/stream":
+                return self.send_sse()
+            if path.startswith("/api/image/"):
+                raw = unquote(self.path.split("/api/image/", 1)[1].split("?", 1)[0])
+                image_root = (DATA / "images").resolve()
+                target = (image_root / raw.replace("\\", "/")).resolve()
+                if image_root not in target.parents or not target.is_file():
+                    return self.fail("image not found", 404)
+                return self.send_file(target, max_age=604800)
+            if path == "/api/config/alison":
+                if not self.auth():
+                    return self.fail("invalid token", 401)
+                return self.ok(alison_config.config())
+            if path.startswith("/api/config/") or path.startswith("/api/service/config/"):
+                if not self.auth():
+                    return self.fail("invalid token", 401)
+                return self.ok(service_config(path.rsplit("/", 1)[-1]))
+        except Exception as exc:
+            return self.fail(exc)
+        # 静态文件（前端）
         if path == "/":
             path = "/index.html"
         target = (WEB / path.lstrip("/")).resolve()
         if WEB.resolve() not in target.parents:
-            return self.send_json(403, {"error": "forbidden"})
+            return self.fail("forbidden", 403)
         if target.exists() and target.is_file():
             return self.send_file(target)
-        return self.send_json(404, {"error": "not found"})
+        return self.fail("not found", 404)
 
+    # ────────────────────────── POST 路由 ──────────────────────────
     def do_POST(self) -> None:
         if not self.auth():
-            return self.send_json(401, {"error": "invalid token"})
+            return self.fail("invalid token", 401)
         length = int(self.headers.get("Content-Length", "0"))
         try:
             payload = json.loads(self.rfile.read(length) if length else b"{}")
         except Exception:
             payload = {}
-        if self.path == "/api/cookies/import":
-            try:
-                save_cookies(str(payload.get("content", "")))
-                audit("cookie_import", {"path": str(COOKIE_FILE)})
-                return self.send_json(200, {"ok": True, "path": str(COOKIE_FILE)})
-            except Exception as exc:
-                return self.send_json(400, {"error": str(exc)})
-        if self.path == "/api/item/update":
-            try:
-                import sqlite3
-                item_id=int(payload.get('id'))
-                allowed={'zh','raw','decision','reason','content_type','ori_url'}
-                values={k:payload[k] for k in allowed if k in payload}
-                if not values: raise ValueError('没有可修改字段')
-                db=DATA/'hx.sqlite3'; conn=sqlite3.connect(db)
-                sets=','.join(f'{k}=?' for k in values)
-                # 手改译文后顺手清掉旧错误信息：留着它会让这条被当成"还没翻译好"，下轮把人工改的覆盖掉
-                extra = ", translate_error=''" if 'zh' in values else ""
-                conn.execute(f'UPDATE items SET {sets}, processed_at=?, rev=COALESCE(rev,0)+1{extra} WHERE id=?', list(values.values())+[time.strftime('%Y-%m-%dT%H:%M:%S'),item_id]); conn.commit(); conn.close()
-                audit('item_update',{'id':item_id,'fields':list(values)}); return self.send_json(200,{'ok':True,'id':item_id})
-            except Exception as exc: return self.send_json(400,{'error':str(exc)})
-        if self.path == "/api/item/delete":
-            try:
-                item_id=int(payload.get('id')); conn=__import__('sqlite3').connect(DATA/'hx.sqlite3'); conn.execute('DELETE FROM items WHERE id=?',(item_id,)); conn.commit(); conn.close(); audit('item_delete',{'id':item_id}); return self.send_json(200,{'ok':True})
-            except Exception as exc: return self.send_json(400,{'error':str(exc)})
-        if self.path == "/api/service/config":
-            try:
+        if not isinstance(payload, dict):
+            payload = {}
+        path = self.path.split("?", 1)[0]
+        try:
+            if path == "/api/service/toggle":
+                name = str(payload.get("service", ""))
+                if name not in SERVICE_NAMES:
+                    raise ValueError(f"未知服务 {name!r}（分发请用 /api/channels/toggle）")
+                enabled = bool(payload.get("enabled"))
+                value = start_service(name) if enabled else stop_service(name)
+                return self.ok({"service": name, "enabled": enabled, "value": value})
+            if path == "/api/channels/toggle":
+                return self.ok(toggle_channel(str(payload.get("channel", "")),
+                                              bool(payload.get("enabled"))))
+            if path == "/api/config/alison":
+                result = alison_config.save(payload.get("values", {}))
+                audit("alison_config", {"keys": result["keys"]})
+                return self.ok(result)
+            if path == "/api/config/alison/groups/add":
+                group = alison_config.add_group(payload.get("group_openid", ""))
+                audit("alison_group_add", {"group_openid": group["group_openid"]})
+                return self.ok({"group": group})
+            if path == "/api/config/alison/groups/toggle":
+                group = alison_config.toggle_group(payload.get("group_openid", ""),
+                                                   payload.get("enabled") is True)
+                audit("alison_group_toggle", {"group_openid": group["group_openid"],
+                                              "enabled": group["push_enabled"]})
+                return self.ok({"group": group})
+            if path == "/api/config/alison/groups/refresh":
+                result = alison_config.start_refresh()
+                audit("alison_groups_refresh", {"total": result["total"]})
+                return self.ok({"refresh": result})
+            if path in ("/api/config", "/api/service/config"):
                 name = str(payload.get("service", ""))
                 values = payload.get("values", {})
                 if not isinstance(values, dict):
                     raise ValueError("配置格式错误")
                 save_service_config(name, values)
                 audit("service_config", {"service": name, "keys": sorted(values)})
-                return self.send_json(200, {"ok": True})
-            except Exception as exc:
-                return self.send_json(400, {"error": str(exc)})
-        if self.path == "/api/service/toggle":
-            name = str(payload.get("service", ""))
-            try:
-                enabled = bool(payload.get("enabled"))
-                value = start_service(name) if enabled else stop_service(name)
-                return self.send_json(200, {"ok": True, "value": value})
-            except Exception as exc:
-                return self.send_json(400, {"error": str(exc)})
-        return self.send_json(404, {"error": "not found"})
+                return self.ok({"service": name})
+            if path == "/api/item/update":
+                update_item(payload)
+                return self.ok({"id": int(payload.get("id"))})
+            if path == "/api/item/delete":
+                item_id = int(payload.get("id"))
+                conn = sqlite3.connect(DATA / "hx.sqlite3")
+                conn.execute("DELETE FROM items WHERE id=?", (item_id,))
+                conn.commit()
+                conn.close()
+                audit("item_delete", {"id": item_id})
+                return self.ok({"id": item_id})
+            if path == "/api/cookies/import":
+                save_cookies(str(payload.get("content", "")))
+                audit("cookie_import", {"path": str(COOKIE_FILE)})
+                return self.ok({"path": str(COOKIE_FILE)})
+        except Exception as exc:
+            return self.fail(exc)
+        return self.fail("not found", 404)
 
     def log_message(self, format: str, *args) -> None:
         pass
@@ -615,12 +812,47 @@ class QuietHTTPServer(ThreadingHTTPServer):
 
 
 def main() -> None:
+    global WS_SERVER, WS_PORT
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--ws-port", type=int, default=WS_PORT,
+                        help="渠道 WebSocket 端口（默认 8788，或环境变量 HX_WS_PORT）")
+    parser.add_argument("--open-browser", action="store_true",
+                        help="HTTP 端口绑定成功后在浏览器打开看板")
     args = parser.parse_args()
-    print("HX dashboard token:", token(), flush=True)
-    QuietHTTPServer((args.host, args.port), Handler).serve_forever()
+    WS_PORT = args.ws_port
+    dashboard_token = token()
+    print("HX dashboard token:", dashboard_token, flush=True)
+    channel_hub.ensure_builtin_channels()
+
+    # 渠道 WebSocket：和 HTTP 同一个进程、独立端口；起不来不拖垮看板（只记日志）
+    WS_SERVER = ChannelWSServer("127.0.0.1", WS_PORT, dashboard_token,
+                                handle_message=channel_hub.handle_message,
+                                on_disconnect=channel_hub.unregister_connection)
+    if not WS_SERVER.start():
+        print(f"[渠道WS] 端口 {WS_PORT} 起不来，渠道将无法连接（看板其余功能可用）", flush=True)
+    print(f"渠道请连：ws://127.0.0.1:{WS_PORT}/ws?token=<上面的 token>", flush=True)
+
+    try:
+        with QuietHTTPServer((args.host, args.port), Handler) as httpd:
+            if args.open_browser:
+                def open_page():
+                    try:
+                        import webbrowser
+                        webbrowser.open(f"http://127.0.0.1:{args.port}/")
+                    except Exception as exc:
+                        print(f"[看板] 自动打开浏览器失败: {exc}", flush=True)
+
+                opener = threading.Timer(0.15, open_page)
+                opener.daemon = True
+                opener.start()
+            print(f"[看板] 服务器终端已就绪：http://127.0.0.1:{args.port}/"
+                  "（关闭此终端即停止服务）", flush=True)
+            httpd.serve_forever()
+    finally:
+        if WS_SERVER is not None:
+            WS_SERVER.stop()
 
 
 if __name__ == "__main__":

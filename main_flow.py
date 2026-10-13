@@ -3,8 +3,8 @@
 =======================================
 作用：把整条推送线串起来，建议每 10 分钟跑一遍：
       模块1(增量抓取) → 模块2(打标打分) → 模块3(AI兜底)
-      → 汇总"判定=发"的新闻 → 写入 配置/待推送.json
-      → 麦麦插件(模块4) 检测到后以麦麦口吻推送。
+      → 判定"发"的结果原地留在 SQLite（items.decision）
+      → 分发端（麦麦插件 / 艾莉森）直接读库取自己还没发过的条目推送。
 
 运行：
     <venv>/Scripts/python.exe main_flow.py
@@ -13,9 +13,9 @@
 说明：
   - 子模块用麦麦 venv 的 pythonw.exe 跑（无控制台黑窗）；找不到就退回当前解释器。
   - 每个子模块独立进程：一个崩了不影响其它模块，日志见 logs/*.log。
-   - 待推送队列与去重规则在 collect/store.py（process/pending_queue.py 是同一份文件格式说明）。
+  - **不再写 待推送.json**：队列就是 items 表里 decision='发' 的行，
+    每条内容发给了哪些通道记在 items.pushed 里（见 distribute/push_db.py）。
 """
-import json
 import os
 import subprocess
 import sys
@@ -32,9 +32,12 @@ for _path in (_REPO, _COLLECT_DIR):
 from collect.jsonio import latest_file
 from collect.logging_util import make_log, setup_console_encoding
 from collect.paths import LOG_DIR, RAW_DIR, WORK_DIR, ROOT  # noqa: F401
+from distribute.push_db import (
+    describe as queue_describe,
+    pending as queue_pending,
+    pending_count as queue_pending_count,
+)
 OUTPUT_DIR = RAW_DIR
-
-from collect.store import append_pending
 
 LOG_FILE = LOG_DIR / "main_flow.log"
 log = make_log(LOG_FILE)
@@ -81,27 +84,13 @@ def run_module(script: str, *args: str) -> bool:
         return False
 
 
-def collect_should_send() -> list:
-    """从 SQLite 读取 decision='发' 的内容，生成分发队列字段。
+def should_send_count() -> int:
+    """库里判定为"发"的条数。
 
-    分数在库里分两列存（ai_score AI 价值分 / rules_score 规则分），队列里统一成 score 给分发端用：
-    score = ai_score 有值就用它，否则用 rules_score。
+    分发端读的就是这些行（外加 items.pushed 里自己那个 source 还不是 true），
+    所以这里只统计、不再生成任何队列文件。
     """
-    from process.db import rows as db_rows
-    should=[]
-    for n in db_rows():
-        if str(n.get("decision") or "") != "发": continue
-        images=n.get("images") or []
-        if isinstance(images,str):
-            try: images=json.loads(images)
-            except Exception: images=[]
-        score = n.get("ai_score")
-        if score is None:
-            score = n.get("rules_score")
-        if score is None:
-            score = 0
-        should.append({"id":n.get("id"),"account":n.get("account",""),"orig_account":n.get("orig_account",""),"forward_comment":n.get("forward_comment",""),"zh":n.get("zh",""),"raw":n.get("raw",""),"images":images,"ori_url":n.get("ori_url",""),"score":score,"date":n.get("date",""),"content_type":n.get("content_type","")})
-    return should
+    return len(queue_pending())
 
 
 def cleanup_old_outputs(keep: int = 3) -> None:
@@ -123,10 +112,9 @@ def run_processing() -> bool:
     if not success:
         log("[错误] 处理阶段存在失败")
         return False
-    should = collect_should_send()
-    log(f"[结果] 本轮判定'发'共 {len(should)} 条")
-    if should:
-        append_pending(should, log)
+    should = should_send_count()
+    log(f"[结果] 库里判定'发'共 {should} 条；{queue_describe()}")
+    log(f"[结果] 待分发 {queue_pending_count()} 条（分发端直接读库，不写队列文件）")
     cleanup_old_outputs()
 
 

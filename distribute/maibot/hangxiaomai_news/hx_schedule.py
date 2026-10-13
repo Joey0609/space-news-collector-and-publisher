@@ -3,15 +3,18 @@
 ==================================================================
 一句话：**不是"来一条推一条"，而是按每个目标自己的设置，决定"现在该不该开口"。**
 
+内容从哪来：看板的渠道 WebSocket（`hx_ws.ChannelClient`，**拉取模式**）。插件不再直接读数据库——
+它按自己的节奏 `want(source, N)` 要一批、发完用 `result` 回报，看板收到成功回执才写库
+（`items.pushed`）。协议见 `dashboard/PROTOCOL.md`。
+
 每 30 秒醒一次，做这些判断（顺序即优先级）：
     1) 全局总闸：功能开关.toml 的"新闻推送"关掉 → 什么都不做
     2) 只看"开了 + 当前在活跃时段"的目标（活跃时段支持跨零点，如 11:00-01:00）
     3) 系统刚休眠唤醒 → 重置各目标节奏，避免唤醒后突发连发
-    4) 有候选内容：
-       - 某目标"静默→活跃"的那一刻 → 每日首推（分数前 10 合成总结卡）
-       - 否则按 各自的上次推送时间 + 随机间隔 到点就发；一次发几条、是否带图、
-         一天最多几次 都是每个目标自己的设置；只从"该目标还没发过"的条目里取
-    5) 没有候选内容：有留档旧闻发旧闻；都没有且连续 3 轮空 → 看"闲聊"开关决定是否说一句
+    4) 某目标"静默→活跃"的那一刻 → 每日首推（拉 10 条合成总结卡）
+       否则按 各自的上次推送时间 + 随机间隔 到点就发；一次发几条、是否带图、
+       一天最多几次 都是每个目标自己的设置
+    5) 所有目标都没有待发内容：有留档旧闻发旧闻；都没有且连续 3 轮空 → 看"闲聊"开关决定是否说一句
 
 状态字段含义见 hx_state.py 顶部注释。
 """
@@ -31,15 +34,7 @@ if __package__ in (None, ""):
         save_field,
         save_last_push,
     )
-    from hx_store import (
-        load_archive,
-        load_pending,
-        load_switch_state,
-        record_sent,
-        save_pending,
-        take_reminder,
-    )
-    from hx_util import item_sent_to, mark_item_sent
+    from hx_store import load_archive, load_switch_state, take_reminder
 else:
     from .hx_paths import STATE_FILE
     from .hx_state import (
@@ -51,15 +46,14 @@ else:
         save_field,
         save_last_push,
     )
-    from .hx_store import (
-        load_archive,
-        load_pending,
-        load_switch_state,
-        record_sent,
-        save_pending,
-        take_reminder,
-    )
-    from .hx_util import item_sent_to, mark_item_sent
+    from .hx_store import load_archive, load_switch_state, take_reminder
+
+CHANNEL = "maibot"   # 本插件的通道名：source = "maibot:private" / "maibot:group_<群号>"
+
+
+def source_of(kind: str) -> str:
+    """目标 kind → source 名（与看板、艾莉森口径一致：`通道:目标`）。"""
+    return f"{CHANNEL}:{kind}"
 
 
 class ScheduleMixin:
@@ -90,6 +84,16 @@ class ScheduleMixin:
         if ma < mi:
             mi, ma = ma, mi
         return random.randint(mi, ma) * 60
+
+    def _channel(self):
+        """看板渠道客户端（plugin.py 在 on_load 里建好；自检里可换成假的）。"""
+        return getattr(self, "_channel_client", None)
+
+    def _channel_ready(self) -> bool:
+        """渠道可用（连上看板 + 没被服务端暂停）才可以要内容。"""
+        client = self._channel()
+        return bool(client is not None and getattr(client, "connected", False)
+                    and not getattr(client, "paused", True))
 
     # ────────────────────────── 主循环 ──────────────────────────
 
@@ -136,6 +140,9 @@ class ScheduleMixin:
                   and self._is_active_hours(t["settings"])]
         if not active:
             return
+        # 没连上看板（或服务端把本渠道暂停了）→ 这一轮什么都不做，等连上/恢复
+        if not self._channel_ready():
+            return
 
         # 精准休眠检测——若系统睡过(GetTickCount64 差值跳变)，重置推送节奏，避免唤醒后突发连发
         if resume_occurred(state_file):
@@ -145,90 +152,98 @@ class ScheduleMixin:
                 save_field(state_file, f"next_gap_{kind}", self._next_random_interval(t["settings"]))
             self.ctx.logger.info("航小麦检测到系统休眠唤醒，已重置推送节奏")
 
-        items = load_pending()
-        if items:
-            # 有新内容 → 重置各目标的"空内容"计数
-            for t in targets:
-                save_field(state_file, f"empty_cycles_{t['kind']}", 0)
-            today = time.strftime("%Y-%m-%d")
-            # 每日首推 = 某目标"静默→活跃"瞬间触发一次，非"当天第一条/唤醒就弹"。
-            # 用 prev_active_sig_<kind> 感知"活跃时段配置变没变"：变了就重置前态，杜绝改配置误触发。
-            for t in targets:
-                kind = t["kind"]
-                sig = str(t["settings"].get("活跃时段", "") or "")
-                prev_sig = load_field(state_file, f"prev_active_sig_{kind}", "")
-                is_active = self._is_active_hours(t["settings"])
-                prev = load_field(state_file, f"prev_active_{kind}", "")
-                if prev_sig != sig:
-                    # 活跃时段配置变了 → 重置"上次是否活跃"，避免被误判成"刚进入活跃"
-                    save_field(state_file, f"prev_active_sig_{kind}", sig)
-                    save_field(state_file, f"prev_active_{kind}", int(is_active))
-                    continue
-                if is_active and prev in ("", "0", 0, False):
-                    done = load_field(state_file, f"daily_summary_done_{kind}", "")
-                    if done != today:
-                        ok = await self._do_daily_first_push(state_file, now, t, items)
-                        if ok:
-                            save_field(state_file, f"daily_summary_done_{kind}", today)
+        today = time.strftime("%Y-%m-%d")
+        # ── 每日首推 = 某目标"静默→活跃"瞬间触发一次，非"当天第一条/唤醒就弹"。
+        #    用 prev_active_sig_<kind> 感知"活跃时段配置变没变"：变了就重置前态，杜绝改配置误触发。
+        for t in targets:
+            kind = t["kind"]
+            sig = str(t["settings"].get("活跃时段", "") or "")
+            prev_sig = load_field(state_file, f"prev_active_sig_{kind}", "")
+            is_active = self._is_active_hours(t["settings"])
+            prev = load_field(state_file, f"prev_active_{kind}", "")
+            if prev_sig != sig:
+                save_field(state_file, f"prev_active_sig_{kind}", sig)
                 save_field(state_file, f"prev_active_{kind}", int(is_active))
+                continue
+            if is_active and prev in ("", "0", 0, False):
+                done = load_field(state_file, f"daily_summary_done_{kind}", "")
+                if done != today:
+                    ok = await self._do_daily_first_push(state_file, now, t)
+                    if ok:
+                        save_field(state_file, f"daily_summary_done_{kind}", today)
+            save_field(state_file, f"prev_active_{kind}", int(is_active))
 
-            # 非首次：逐个"活跃且到点"的目标，按各自设置推送。
-            # 每个目标独立从同一候选池取"自己还没发过"的 top 条（互不占用同一队列），
-            # 保证 私聊/群 各自按自己配置推同一候选、且群不会因为私聊先发而漏掉。
-            all_kinds = [t["kind"] for t in targets]
-            sent_any = False
-            for t in active:
-                s = t["settings"]
-                kind = t["kind"]
-                last_t = load_field(state_file, f"last_push_ts_{kind}", 0.0)
-                gap = load_field(state_file, f"next_gap_{kind}", self._next_random_interval(s))
-                if last_t and (now - last_t) < gap:
+        # ── 常规：逐个"活跃且到点"的目标，按各自设置要一批、发、回报 ──
+        pending_anywhere = False       # 有没有"内容但还不到点"，用来决定要不要走留档/闲聊兜底
+        sent_any = False
+        for t in active:
+            s = t["settings"]
+            kind = t["kind"]
+            source = source_of(kind)
+            last_t = load_field(state_file, f"last_push_ts_{kind}", 0.0)
+            gap = load_field(state_file, f"next_gap_{kind}", self._next_random_interval(s))
+            if last_t and (now - last_t) < gap:
+                if self._channel_pending(source) > 0:
+                    pending_anywhere = True
+                continue
+            daily_max = int(s.get("一天最多发几次", 0) or 0)
+            if daily_max > 0 and daily_reached(state_file, daily_max):
+                if self._channel_pending(source) > 0:
+                    pending_anywhere = True
+                continue
+
+            batch = max(1, int(s.get("一次发几条", 1) or 1))
+            items = self._channel_want(source, batch)
+            if not items:
+                continue
+            # 有内容 → 重置各目标的"空内容"计数
+            for other in targets:
+                save_field(state_file, f"empty_cycles_{other['kind']}", 0)
+            with_img = self._bool_setting(s, "带图", True)
+            delivered = 0
+            for item in items:
+                news_text = str(item.get("zh") or item.get("raw") or "").strip()
+                if not news_text:                     # 没正文的条目直接回报失败，别占着
+                    self._channel_result(source, item.get("id"), False, "条目没有正文")
                     continue
-                daily_max = int(s.get("一天最多发几次", 0) or 0)
-                if daily_max > 0 and daily_reached(state_file, daily_max):
+                try:
+                    ok = await self._speak_news(t["stream_id"], item, with_img)
+                except Exception as e:
+                    self.ctx.logger.warning(f"航小麦推送单条失败: {e}")
+                    self._channel_result(source, item.get("id"), False, str(e))
                     continue
-                batch = max(1, int(s.get("一次发几条", 1) or 1))
-                # 只在这个目标"还没发过"的条目里取（别的目标发过但自己没发的也要发）
-                candidates = [it for it in items if kind not in item_sent_to(it)]
-                to_send = candidates[:batch]
-                if not to_send:
+                # 注意：_speak_news 失败时是**返回 False**（内部吞了异常），不是抛出来。
+                # 这里必须看返回值：谎报成功会让这条被写进"已发"，内容就永远丢了。
+                if not ok:
+                    self.ctx.logger.warning(f"航小麦推送失败（麦麦发送返回失败）: {source} "
+                                            f"item={item.get('id')}")
+                    self._channel_result(source, item.get("id"), False, "麦麦发送返回失败")
                     continue
-                with_img = self._bool_setting(s, "带图", True)
-                for item in to_send:
-                    news_text = str(item.get("zh") or item.get("raw") or "").strip()
-                    if not news_text:
-                        continue
-                    try:
-                        await self._speak_news(t["stream_id"], item, with_img)
-                    except Exception as e:
-                        self.ctx.logger.warning(f"航小麦推送单条失败: {e}")
-                for item in to_send:
-                    mark_item_sent(item, kind)
-                record_sent(to_send)
-                save_field(state_file, f"last_push_ts_{kind}", now)
-                save_field(state_file, f"next_gap_{kind}", self._next_random_interval(s))
-                record_daily_push(state_file)
-                sent_any = True
-                await asyncio.sleep(1.5)  # 私聊/群之间隔 1.5s，避免被 QQ 限流
-            if sent_any:
-                save_last_push(state_file, now)
-                # 只保留"还有目标没发到"的条目（所有目标都发过才从候选池移除）
-                keep = [it for it in items if not all(k in item_sent_to(it) for k in all_kinds)]
-                save_pending(keep)
+                self._channel_result(source, item.get("id"), True)
+                delivered += 1
+            if not delivered:
+                continue
+            save_field(state_file, f"last_push_ts_{kind}", now)
+            save_field(state_file, f"next_gap_{kind}", self._next_random_interval(s))
+            record_daily_push(state_file)
+            sent_any = True
+            await asyncio.sleep(1.5)  # 私聊/群之间隔 1.5s，避免被 QQ 限流
+
+        if sent_any:
+            save_last_push(state_file, now)
+        if sent_any or pending_anywhere:
             return
 
-        # 队列空：有留档发留档；都空则按目标各自"闲聊"开关 + 间隔 + 连续 3 次空才来一句
+        # ── 兜底：内容都发完了 → 有留档发留档；都没有且连续 3 轮空才闲聊一句 ──
         archive = load_archive()
         for t in active:
             s = t["settings"]
             kind = t["kind"]
-            # 该目标的间隔还没到 → 先不打扰
             last_t = load_field(state_file, f"last_push_ts_{kind}", 0.0)
             gap = load_field(state_file, f"next_gap_{kind}", self._next_random_interval(s))
             if last_t and (now - last_t) < gap:
                 continue
             if archive:
-                # 有旧闻 → 发一条留档（内容型兜底），并按该目标带图
                 try:
                     ok = await self._send_one_archive_to(t)
                     if ok:
@@ -240,7 +255,6 @@ class ScheduleMixin:
                 except Exception as e:
                     self.ctx.logger.warning(f"航小麦留档兜底失败({kind}): {e}")
             else:
-                # 没有旧闻也没新内容：连续 3 次空 → 由该目标决定是否闲聊
                 if not self._bool_setting(s, "闲聊", True):
                     continue
                 empty = int(load_field(state_file, f"empty_cycles_{kind}", 0) or 0) + 1
@@ -260,3 +274,30 @@ class ScheduleMixin:
                         save_field(state_file, f"empty_cycles_{kind}", empty)
                 else:
                     save_field(state_file, f"empty_cycles_{kind}", empty)
+
+    # ────────────────────────── 和看板渠道打交道（失败一律不抛出）──────────────────────────
+
+    def _channel_want(self, source: str, count: int) -> list:
+        """向看板要最多 count 条未发内容；失败/没连上返回 []。"""
+        client = self._channel()
+        try:
+            return client.want(source, count) or []
+        except Exception as e:
+            self.ctx.logger.warning(f"航小麦取内容失败({source}): {e}")
+            return []
+
+    def _channel_pending(self, source: str) -> int:
+        """问看板：这个目标还有多少条未发（决定要不要走兜底）。"""
+        client = self._channel()
+        try:
+            return int(client.pending(source) or 0)
+        except Exception:
+            return 0
+
+    def _channel_result(self, source: str, item_id, ok: bool, detail: str = "") -> None:
+        """回报单条发送结果（ok=True 才会被看板写进库）。"""
+        client = self._channel()
+        try:
+            client.send_result(source, item_id, ok, detail)
+        except Exception as e:
+            self.ctx.logger.warning(f"航小麦回报结果失败({source}/{item_id}): {e}")
