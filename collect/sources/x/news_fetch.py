@@ -14,7 +14,7 @@ for _path in (_ROOT, _COLLECT):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from collect.env import COOKIES_PATH, NEWS_ACCOUNTS, PROXY_URL, WATCH_ACCOUNT  # noqa: E402,F401
+from collect.env import COOKIES_PATH, PROXY_URL  # noqa: E402,F401
 from collect.logging_util import make_log, setup_console_encoding  # noqa: E402
 from collect.paths import CONFIG_DIR, LOG_DIR, OUTPUT_DIR, ROOT, SEED_DIR  # noqa: E402,F401
 from collect.store import load_baseline, load_cursor, save_baseline, save_cursor  # noqa: E402,F401

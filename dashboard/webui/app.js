@@ -402,16 +402,19 @@ function buildItem(item) {
   element.className = "item";
   element.dataset.key = keyOf(item);
   const title = String(item.ai_title || "").trim();
-  const summary = String(item.ai_summary || "").trim();
   const chipHtml = chipRow(item);
   const lightHtml = lightsHtml(item);
   element.innerHTML = `
       <div class="item-main">
         <b><span class="lights">${lightHtml}</span> ${esc(item.account || "未知账号")} · ${esc(item.content_type || "内容")}</b>
         ${title ? `<div class="item-title">${esc(title)}</div>` : ""}
-        <div class="item-preview">${esc(summary || item.zh || item.raw || "")}</div>
+        <div class="item-preview">${esc(item.zh || item.raw || "")}</div>
         ${chipHtml ? `<div class="chips">${chipHtml}</div>` : ""}
-        ${sourceUrl(item) ? `来源：<a class="source-url" href="${esc(sourceUrl(item))}" target="_blank" rel="noopener noreferrer">${esc(sourceUrl(item))}</a>` : ""}
+        <div class="item-provenance">
+          <div><span>来源：</span>${sourceUrl(item) ? `<a class="source-url" href="${esc(sourceUrl(item))}" target="_blank" rel="noopener noreferrer" title="${esc(sourceUrl(item))}">${esc(sourceUrl(item))}</a>` : "<em>—</em>"}</div>
+          <div><span>信息发布时间：</span><time>${esc(formatTime(item.ts || item.date))}</time></div>
+          <div><span>信息获取时间：</span><time>${esc(formatTime(item.collected_at))}</time></div>
+        </div>
       </div>
       ${thumbnail}
     `;
@@ -448,6 +451,7 @@ function applyState(data) {
   mergeState(data);
 
   if (data.services) renderServices(data.services);
+  if (data.process_progress) renderProcessProgress(data.process_progress);
   if (data.configurable !== undefined || data.configurable_services !== undefined) {
     const value = data.configurable !== undefined ? data.configurable : data.configurable_services;
     // 正常是服务名数组；万一是布尔（"后端能不能配"）就别把它当数组用
@@ -480,6 +484,62 @@ function renderServices(services) {
       status.className = service.running ? "running" : "stopped";
     }
     if (button) button.textContent = service.running ? "停止" : "启动";
+  }
+}
+
+function renderProcessProgress(progress) {
+  const currentLine = $("#process-progress-current");
+  const remaining = $("#process-remaining");
+  const countButton = $("#process-backlog-open");
+  if (!currentLine || !remaining || !countButton) return;
+  const current = progress.current;
+  if (progress.running && current) {
+    const title = current.title || String(current.raw || "").replace(/\s+/g, " ").slice(0, 64) || "正在整理内容";
+    const position = progress.total ? ` · ${progress.index}/${progress.total}` : "";
+    currentLine.textContent = `${progress.phase || "正在处理"}：#${current.id} @${current.account || "未知账号"} · ${title}${position}`;
+  } else if (progress.running) {
+    currentLine.textContent = progress.phase || "正在准备处理任务";
+  } else {
+    currentLine.textContent = progress.phase === "已停止" ? "处理服务尚未运行" : (progress.phase || "等待处理");
+  }
+  remaining.textContent = String(progress.remaining_count || 0);
+  const stuck = Number(progress.stuck_count || 0);
+  countButton.title = stuck ? `${stuck} 条已达到自动重试上限` : "点击查看所有待处理内容";
+  countButton.classList.toggle("has-stuck", stuck > 0);
+  countButton.setAttribute("aria-label", `剩余 ${progress.remaining_count || 0} 条，点击查看列表${stuck ? `，其中 ${stuck} 条达到重试上限` : ""}`);
+}
+
+function renderProcessBacklog(data) {
+  const items = Array.isArray(data?.items) ? data.items : [];
+  const list = $("#process-backlog-list");
+  const summary = $("#process-backlog-summary");
+  summary.textContent = `剩余 ${data?.remaining_count || 0} 条 · 可自动处理 ${data?.ready_count || 0} 条 · 达到重试上限 ${data?.stuck_count || 0} 条`;
+  if (!items.length) {
+    list.innerHTML = '<p class="process-backlog-empty">当前没有待处理内容。</p>';
+    return;
+  }
+  list.innerHTML = items.map((item) => {
+    const title = item.title || String(item.raw || "").replace(/\s+/g, " ").slice(0, 100) || "（无正文）";
+    const missing = item.missing?.length ? `缺少：${item.missing.join("、")}` : "译文待完成";
+    const status = item.stuck ? "达到重试上限" : (item.error ? "失败待重试" : "等待处理");
+    const origin = item.origin_id ? ` · X:${item.origin_id}` : "";
+    return `<article class="process-backlog-item ${item.stuck ? "is-stuck" : ""}">
+      <div class="process-backlog-item__head"><strong>#${esc(item.id)} · ${esc(title)}</strong><span>${esc(status)}</span></div>
+      <div class="process-backlog-item__meta">@${esc(item.account)} · ${esc(item.phase)} · ${esc(item.stage || "")} · ${esc(missing)} · 尝试 ${esc(item.attempts)}/${esc(item.max_attempts)}${esc(origin)}</div>
+      ${item.error ? `<p class="process-backlog-item__error">${esc(item.error)}</p>` : ""}
+    </article>`;
+  }).join("");
+}
+
+async function openProcessBacklog() {
+  const dialog = $("#process-backlog-dialog");
+  const list = $("#process-backlog-list");
+  list.innerHTML = '<p class="process-backlog-empty">正在读取待处理列表…</p>';
+  dialog.showModal();
+  try {
+    renderProcessBacklog(await apiGet("/api/process/backlog"));
+  } catch (error) {
+    list.innerHTML = `<p class="process-backlog-empty">读取失败：${esc(error.message || "请稍后重试")}</p>`;
   }
 }
 
@@ -666,19 +726,21 @@ function renderPushes(pushes, errorText = "") {
   const body = $("#pushes-body");
   if (!body) return;
   if (errorText) {
-    body.innerHTML = `<tr><td colspan="4" class="pushes-empty">${esc(errorText)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="pushes-empty">${esc(errorText)}</td></tr>`;
     return;
   }
   if (!pushes.length) {
-    body.innerHTML = `<tr><td colspan="4" class="pushes-empty">还没有分发记录。</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="pushes-empty">还没有分发记录。</td></tr>`;
     return;
   }
   body.innerHTML = pushes.map((push) => {
     const target = push.label || push.kind || push.source || "—";
+    const status = push.status === "success" ? "成功" : push.status === "sent_unrecorded" ? "已送达，待记账" : "失败";
     return `<tr>
       <td class="mono">${esc(formatTime(push.sent_at))}</td>
       <td>${esc(push.channel || "—")}</td>
       <td>${esc(target)}</td>
+      <td><span class="push-status ${push.status === "success" ? "is-success" : "is-failed"}">${esc(status)}</span>${push.detail ? `<small class="push-detail">${esc(push.detail)}</small>` : ""}</td>
       <td>${esc(pushTitle(push))}</td>
     </tr>`;
   }).join("");
@@ -1147,7 +1209,6 @@ async function saveConfig() {
 
 /* ── 艾莉森 QQ Bot：独立配置弹窗；刷新时绝不重绘正在编辑的表单 ── */
 const ALISON_KEYS = ["APPID", "SECRET", "SANDBOX", "ALISON_WITH_IMAGE", "ALISON_DISCOVER_GROUPS"];
-const ALISON_NOTE = "群消息会自动登记群。未 @ 的普通消息需在每个 QQ 群的机器人设置开启「获取群内全部消息」并确认具备全量事件权限；未开启时仍可由入群或 @ 消息发现。";
 let alisonSession = 0;
 let alisonPoll = null;
 let alisonBusy = false;
@@ -1215,12 +1276,15 @@ function alisonGroupCard(group) {
   const memberLabel = !member ? "已退群" : (!group.last_checked && !group.joined_at ? "已登记 · 待核实" : "已加入");
   const enabled = alisonBool(group.push_enabled);
   const tags = alisonTags(group.group_tags);
+  const name = String(group.group_name || "群资料查询中…");
+  const memberCount = group.group_member_num === null || group.group_member_num === undefined || group.group_member_num === ""
+    ? "查询中…" : String(group.group_member_num);
   return `<article class="alison-group-card">
-    <div class="alison-group-top"><div class="alison-group-identity"><h4>${esc(group.group_name || "未命名群")}</h4><code>${esc(id)}</code></div>
-      <label class="alison-group-toggle"><span>推送${enabled ? "已开启" : "已关闭"}</span><input type="checkbox" role="switch" data-alison-group="${esc(id)}" ${enabled ? "checked" : ""} ${alisonGroupBusy.has(id) ? "disabled" : ""} aria-label="${esc(group.group_name || id)} 推送" /></label></div>
+    <div class="alison-group-top"><div class="alison-group-identity"><h4>${esc(name)}</h4></div>
+      <label class="alison-group-toggle"><span>推送${enabled ? "已开启" : "已关闭"}</span><input type="checkbox" role="switch" data-alison-group="${esc(id)}" ${enabled ? "checked" : ""} ${alisonGroupBusy.has(id) ? "disabled" : ""} aria-label="${esc(name)} 推送" /></label></div>
     <div class="alison-group-info">${group.group_finger_memo ? `<p>${esc(group.group_finger_memo)}</p>` : ""}
       <div class="alison-group-tags">${group.group_class_text ? `<span>${esc(group.group_class_text)}</span>` : ""}${tags.map(tag => `<span>${esc(tag)}</span>`).join("")}</div>
-      <div class="alison-group-meta"><span>人数 ${group.group_member_num === null || group.group_member_num === undefined || group.group_member_num === "" ? "—" : esc(group.group_member_num)}</span><span>成员状态：${memberLabel}</span><span>加入时间：${esc(formatTime(group.joined_at))}</span><span>上次检查：${esc(formatTime(group.last_checked))}</span></div>
+      <div class="alison-group-meta"><span>人数 ${esc(memberCount)}</span><span>成员状态：${memberLabel}</span><span>加入时间：${esc(formatTime(group.joined_at))}</span><span>上次检查：${esc(formatTime(group.last_checked))}</span></div>
       ${group.last_error ? `<p class="alison-group-error">检查错误：${esc(group.last_error)}</p>` : ""}</div>
     </article>`;
 }
@@ -1288,10 +1352,17 @@ async function openAlison() {
     if (session !== alisonSession || !dialog.open) return;
     fillAlisonFields(data?.fields);
     renderAlisonGroups(data?.groups);
-    $("#alison-discovery-note").textContent = data?.discovery_note || ALISON_NOTE;
     $("#alison-content").hidden = false;
     alisonStatus("#alison-load-state", "");
     renderAlisonRefresh(data?.refresh);
+    const hasCredentials = ["APPID", "SECRET"].every(key =>
+      String((data?.fields || []).find(field => field.key === key)?.value || "").trim());
+    const missingInfo = (data?.groups || []).some(group => group.is_member && !group.last_checked &&
+      (!group.group_name || group.group_member_num === null || group.group_member_num === undefined));
+    if (hasCredentials && missingInfo && !data?.refresh?.running) {
+      const started = await apiPost("/api/config/alison/groups/refresh", { missing_only: true });
+      if (session === alisonSession && dialog.open) renderAlisonRefresh(started?.refresh);
+    }
   } catch (_) {
     if (session === alisonSession && dialog.open) alisonError(null, "配置读取失败，请关闭后重试。");
   } finally { if (session === alisonSession) alisonLoading = false; }
@@ -1471,6 +1542,8 @@ document.addEventListener("click", (event) => {
   }
 
   if (event.target.id === "detail-close") detailDialog.close();
+  if (event.target.id === "process-backlog-open") openProcessBacklog();
+  if (event.target.id === "process-backlog-close") $("#process-backlog-dialog").close();
   if (event.target.id === "detail-save") saveDetail();
   if (event.target.id === "detail-delete") deleteDetail();
   if (event.target.id === "config-close" || event.target.id === "config-cancel") $("#config-dialog").close();

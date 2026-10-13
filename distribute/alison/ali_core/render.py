@@ -4,12 +4,12 @@
 队列来自 SQLite（decision='发' 且本通道 source 不是 true，见 push_queue.py），
 所以这里**不再判断"发没发过"**——传进来的就是还没发过的。
 
-格式（艾莉森只做纯转述，不写文案）：
-    来源：@<原帖作者> · X · UTC+8-YYYY-MM-DD-HH:MM
-    <空行>
+格式：
+    AI标题 - 原帖作者账号
     <中文译文正文>
-    <空行>
-    转发@<账号>：<转发者评论> （仅转推且原帖作者有加话时才有）
+    YYYY.MM.DD HH:MM（北京时间）
+
+图片仍作为富媒体附件随消息发送，位于文字内容之后。
 """
 import datetime
 
@@ -49,6 +49,27 @@ def build_source_line(item: dict) -> str:
     return "来源：" + " · ".join(parts)
 
 
+def fmt_beijing_short(date_str: str, ts) -> str:
+    """北京时间短格式 YYYY.MM.DD HH:MM；无有效时间时返回空串。"""
+    d = None
+    if ts:
+        try:
+            d = datetime.datetime.fromtimestamp(float(ts), tz=datetime.timezone.utc)
+        except Exception:
+            d = None
+    if d is None and date_str:
+        try:
+            s = str(date_str).strip().replace("T", " ").replace("+00:00", "").strip()
+            d = datetime.datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc)
+        except Exception:
+            d = None
+    if d is None:
+        return ""
+    bj = d.astimezone(datetime.timezone(datetime.timedelta(hours=8)))
+    return bj.strftime("%Y.%m.%d %H:%M")
+
+
 def quoted_text(item: dict) -> str:
     """引用推文里【被引用的那条】的展示块；没有引用返回空串。
 
@@ -65,18 +86,22 @@ def quoted_text(item: dict) -> str:
 
 
 def build_text(item: dict) -> str:
-    """完整正文：来源行 + 译文 + （转推的）转发者评论 + （引用的）被引用内容。"""
-    src = build_source_line(item)
+    """艾莉森消息：AI 标题和作者、当前译文、末尾北京时间。"""
+    title = str(item.get("ai_title") or "").strip()
+    account = str(item.get("orig_account") or item.get("account") or "").strip()
     body = str(item.get("zh") or item.get("raw") or "").strip()
-    text = (src + "\n\n" + body) if src else body
-    fc = str(item.get("forward_comment", "") or "").strip()
-    if fc:
-        fa = str(item.get("account", "") or "")
-        text += "\n\n" + (f"转发@{fa}：" + fc if fa else "转发者：" + fc)
-    qt = quoted_text(item)
-    if qt:
-        text += "\n\n" + qt
-    return text
+    date = fmt_beijing_short(str(item.get("date", "") or ""), item.get("ts"))
+    # 老数据或非新闻没有 AI 标题时，以正文第一行兜底，避免出现空标题。
+    if not title:
+        title = body.splitlines()[0].strip()[:30] if body else "航天资讯"
+    headline = f"{title} - {account}" if account else title
+    parts = [headline]
+    if body:
+        parts.append(body)
+    if date:
+        parts.append(date)
+    # QQ 富媒体消息会将 content 放在 media 图片之前；正文各段只用单换行。
+    return "\n".join(parts)
 
 
 def item_images(item: dict) -> list:

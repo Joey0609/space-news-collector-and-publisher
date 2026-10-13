@@ -20,7 +20,8 @@ DISCOVERY_NOTE = ("QQ 官方没有查询机器人全部已加入群的接口；�
                   "会自动维护目录。要接收未 @ 的普通消息，需在每个 QQ 群的机器人设置中"
                   "将『可获取的群消息范围』设为『获取群内全部消息』，且机器人拥有全量事件权限；"
                   "未开启时只能靠入群事件和 @ 消息发现新群。"
-                  "历史未记录的群也可手动补录 OpenID。刷新仅查询已知群的信息，可能要求白名单权限。"
+                  "历史未记录的群也可手动补录 OpenID。打开群目录时会自动补齐新群资料，"
+                  "也可手动刷新已知群信息；查询可能要求白名单权限。"
                   "新群默认关闭推送。沙箱与正式机器人是不同的消息连接："
                   "要接收正式群消息，请使用该群里的机器人 APPID/SECRET 并选择正式环境；"
                   "艾莉森发送使用同一个 BotPy 长连接；群发现开关只控制事件登记。"
@@ -38,6 +39,7 @@ def _refresh_state() -> dict:
 
 def config() -> dict:
     stored = env.load_env_file()
+    known = groups.list_groups(db_file=DB_FILE)
     fields = []
     for key in FIELDS:
         fields.append({"key": key, "value": stored.get(key, DEFAULTS.get(key, "")),
@@ -48,7 +50,7 @@ def config() -> dict:
     if overrides:
         note += " 注意：进程环境变量覆盖了以下文件配置，需在进程环境中修改：" + "、".join(overrides) + "。"
     return {"service": "alison", "fields": fields,
-            "groups": groups.list_groups(db_file=DB_FILE), "refresh": _refresh_state(),
+            "groups": known, "refresh": _refresh_state(),
             "discovery_note": note}
 
 
@@ -84,13 +86,16 @@ def toggle_group(group_openid: str, enabled: bool) -> dict:
     return groups.set_push_enabled(group_openid, enabled, db_file=DB_FILE)
 
 
-def start_refresh() -> dict:
-    """Only an explicit dashboard POST starts outbound QQ API calls; no QQ messages are sent."""
+def start_refresh(*, missing_only: bool = False) -> dict:
+    """读取已知群资料；打开目录时仅补齐尚未查过的新群，不发送 QQ 消息。"""
     stored = env.load_env_file()
     appid, secret = env.credentials(stored)
     if not appid or not secret:
         raise ValueError("先填写并保存艾莉森 APPID 和 SECRET")
     known = groups.list_groups(members_only=True, db_file=DB_FILE)
+    if missing_only:
+        known = [row for row in known if not row["last_checked"] and
+                 (not row["group_name"] or row["group_member_num"] is None)]
     with LOCK:
         if REFRESH["running"]:
             return dict(REFRESH)

@@ -239,7 +239,8 @@ send = FakeSend()
 plugin.ctx = type("Ctx", (), {"logger": logger, "chat": FakeChat(), "send": send,
                               "message": FakeMessage()})()
 
-SAMPLE = {"id": 1, "account": "SpaceX", "zh": "星舰第十次试飞成功", "raw": "Starship",
+SAMPLE = {"id": 1, "account": "SpaceX", "ai_title": "星舰第十次试飞成功",
+          "zh": "星舰第十次试飞成功", "raw": "Starship",
           "score": 90, "images": [], "date": "2026-09-18 12:00:00", "ts": 1789000000}
 channel = FakeChannelClient(targets=[{"kind": "private", "label": "私聊"},
                                      {"kind": "group_20002", "label": "群 20002"}])
@@ -253,6 +254,8 @@ targets_hit = {c[1] for c in send.calls}
 check("私聊和群都发了", "s_priv_10001" in targets_hit and "s_grp_20002" in targets_hit, targets_hit)
 check("消息里有来源行", any("来源：@SpaceX" in c[2] for c in send.calls if c[0] == "text"),
       [c[2][:40] for c in send.calls if c[0] == "text"])
+check("消息里有 AI 标题", any("星舰第十次试飞成功" in c[2] for c in send.calls if c[0] == "text"),
+      [c[2][:60] for c in send.calls if c[0] == "text"])
 check("发成功后回报 ok=True（看板据此写库）",
       sorted(channel.results) == [("maibot:group_20002", 1, True, ""),
                                   ("maibot:private", 1, True, "")], channel.results)

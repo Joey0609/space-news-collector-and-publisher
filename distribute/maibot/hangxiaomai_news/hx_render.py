@@ -81,10 +81,11 @@ def quoted_text(item: dict) -> str:
 
 
 def body_text(item: dict) -> str:
-    """正文（来源行 + 译文 + 转发评论 + 被引用内容），即"纯转述"模式下的一条消息文本。"""
+    """正文（AI 标题 + 来源行 + 译文 + 转发评论 + 被引用内容）。"""
+    title = str(item.get("ai_title") or "").strip()
     src = build_source_line(item)
     body = str(item.get("zh") or item.get("raw") or "").strip()
-    text = (src + "\n\n" + body) if src else body
+    text = "\n\n".join(part for part in (title, src, body) if part)
     fl = forward_line(item)
     if fl:
         text += "\n\n" + fl

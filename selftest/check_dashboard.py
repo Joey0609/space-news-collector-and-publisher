@@ -82,6 +82,7 @@ def test_api_envelope():
         assert status == 200 and body["ok"] is True, body
         data = body["data"]
         assert set(data) >= {"services", "channels", "stats", "env_ready", "ws_url"}, list(data)
+        assert set(data) >= {"process_progress"} and data["process_progress"]["remaining_count"] == 0, data
         assert set(data["services"]) == {"collect", "process"}, list(data["services"])
         assert set(data["stats"]) >= {"item_count", "pending_count", "latest_id", "latest_rev"}
         assert any(c["id"] == "alison" for c in data["channels"]), data["channels"]
@@ -100,6 +101,8 @@ def test_api_envelope():
 
         status, body = get("/api/snapshot?offset=0&limit=5")
         assert body["ok"] and isinstance(body["data"]["items"], list), body
+        status, body = get("/api/process/backlog")
+        assert status == 200 and body["ok"] and body["data"]["remaining_count"] == 0, body
 
         status, body = get("/api/config/alison", token=False)
         assert status == 401 and body["ok"] is False, body
@@ -278,6 +281,52 @@ def test_pagination_and_changes():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_process_backlog():
+    """唯一完整分析队列涵盖缺灯/缺元数据，且已达上限单独计数。"""
+    tmp = Path(__file__).resolve().parent / ".sandbox" / "process_backlog_case"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    original_data = server.DATA
+    original_attempts = server._max_process_attempts
+    server.DATA = tmp
+    server._max_process_attempts = lambda: 3
+    try:
+        conn = sqlite3.connect(tmp / "hx.sqlite3")
+        conn.execute("""CREATE TABLE items(
+            id INTEGER PRIMARY KEY, origin_id TEXT, account TEXT, raw TEXT, zh TEXT,
+            stage TEXT, ai_title TEXT, ai_score INTEGER, ai_tags TEXT,
+            is_news INTEGER, not_repeat INTEGER, not_comment INTEGER, not_sensitive INTEGER,
+            translate_attempts INTEGER, translate_error TEXT, meta_attempts INTEGER,
+            meta_error TEXT, ts INTEGER)""")
+        fields = ("id, origin_id, account, raw, zh, stage, ai_title, ai_score, ai_tags, "
+                  "is_news, not_repeat, not_comment, not_sensitive, translate_attempts, "
+                  "translate_error, meta_attempts, meta_error, ts")
+        conn.execute(f"INSERT INTO items({fields}) VALUES(1,'2109939184257695951','Redwire','raw','译文',"
+                     "'processed','已有标题',65,'[\"领域:发射\"]',1,NULL,1,1,1,'',2,'',100)")
+        conn.execute(f"INSERT INTO items({fields}) VALUES(2,'done','NASA','raw','译文',"
+                     "'processed','标题',80,'[\"领域:任务\"]',1,1,1,1,1,'',0,'',90)")
+        conn.execute(f"INSERT INTO items({fields}) VALUES(3,'stuck','NASA','raw','译文',"
+                     "'processed','标题',NULL,'[\"领域:任务\"]',1,1,1,1,3,'格式无效',0,'',80)")
+        conn.execute(f"INSERT INTO items({fields}) VALUES(4,'untranslated','X','raw','',"
+                     "'collected','',NULL,'',NULL,NULL,NULL,NULL,0,'',0,'',70)")
+        conn.commit()
+        conn.close()
+
+        result = server.process_backlog()
+        assert result["remaining_count"] == 3, result
+        assert result["ready_count"] == 2 and result["stuck_count"] == 1, result
+        by_id = {item["id"]: item for item in result["items"]}
+        assert "重复" in by_id[1]["missing"] and by_id[1]["phase"] == "待完整分析" and by_id[1]["attempts"] == 1, by_id[1]
+        assert by_id[3]["stuck"] and "AI分" in by_id[3]["missing"], by_id[3]
+        assert by_id[4]["phase"] == "待完整分析", by_id[4]
+        summary = server.process_backlog(include_items=False)
+        assert summary == {"items": [], "remaining_count": 3, "ready_count": 2, "stuck_count": 1}, summary
+    finally:
+        server.DATA = original_data
+        server._max_process_attempts = original_attempts
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_launchers():
     """根目录启动器：必须存在、ps1 必须带 BOM（无 BOM 时 PS 5.1 按 GBK 读，中文会变乱码并报语法错）。"""
     root = Path(__file__).resolve().parents[1]
@@ -316,5 +365,6 @@ if __name__ == "__main__":
     test_api_envelope()
     test_stop_kills_whole_tree()
     test_pagination_and_changes()
+    test_process_backlog()
     test_launchers()
     print("dashboard 服务标签 + API 契约 + 停止服务杀整棵树 + 分页/增量推送 + 启动器: OK")

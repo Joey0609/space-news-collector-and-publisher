@@ -78,7 +78,6 @@ def _ensure(conn: sqlite3.Connection) -> None:
         # 否则下面那句 ALTER 会打在空气上（no such table: items）。
         from collect.db import ensure_schema
         ensure_schema(conn)
-        return
     cols = {row[1] for row in conn.execute("PRAGMA table_info(items)").fetchall()}
     if "pushed" not in cols:
         conn.execute("ALTER TABLE items ADD COLUMN pushed TEXT DEFAULT '{}'")
@@ -87,7 +86,63 @@ def _ensure(conn: sqlite3.Connection) -> None:
         " channel TEXT DEFAULT '', kind TEXT DEFAULT '', source TEXT, sent_at TEXT,"
         " UNIQUE(source, item_id))"
     )
+    push_cols = {row[1] for row in conn.execute("PRAGMA table_info(pushes)")}
+    if "source" not in push_cols:
+        conn.execute("ALTER TABLE pushes ADD COLUMN source TEXT")
+    if "sent_at" not in push_cols:
+        conn.execute("ALTER TABLE pushes ADD COLUMN sent_at TEXT")
+    if "sent_ts" in push_cols:
+        conn.execute("UPDATE pushes SET sent_at=COALESCE(sent_at,CAST(sent_ts AS TEXT))")
+    conn.execute("UPDATE pushes SET source=channel||':'||kind WHERE source IS NULL"
+                 " AND COALESCE(channel,'')<>'' AND COALESCE(kind,'')<>''")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS pushes_source_item_unique"
+                 " ON pushes(source,item_id)")
+    conn.execute("CREATE TABLE IF NOT EXISTS push_attempts("
+                 "id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, channel TEXT NOT NULL,"
+                 "kind TEXT NOT NULL, source TEXT NOT NULL, attempted_at TEXT NOT NULL,"
+                 "status TEXT NOT NULL, detail TEXT DEFAULT '')")
+    conn.execute("CREATE INDEX IF NOT EXISTS push_attempts_recent"
+                 " ON push_attempts(attempted_at DESC,id DESC)")
     conn.commit()
+
+
+def record_attempt(item_id: int, source: str, status: str, detail: str = "", db_file=None) -> None:
+    """保留每次分发结果；失败不能写入 pushes 或 items.pushed。"""
+    channel, kind = split_source(source)
+    conn = connect(db_file)
+    try:
+        conn.execute("INSERT INTO push_attempts(item_id,channel,kind,source,attempted_at,status,detail)"
+                     " VALUES(?,?,?,?,?,?,?)",
+                     (int(item_id), channel, kind, source, _now(), status, str(detail or "")[:300]))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def reconcile_deliveries(source: str, db_file=None) -> set[int]:
+    """QQ 已确认送达但记账失败时，只补记数据库，绝不再次调用发送接口。"""
+    conn = connect(db_file)
+    try:
+        ids = {int(row[0]) for row in conn.execute(
+            "SELECT item_id FROM push_attempts WHERE source=? AND status='sent_unrecorded'",
+            (source,))}
+    finally:
+        conn.close()
+    blocked = set()
+    for item_id in ids:
+        try:
+            mark_pushed([item_id], source, db_file=db_file)
+            conn = connect(db_file)
+            try:
+                conn.execute("UPDATE push_attempts SET status='success',detail='已补记发送成功'"
+                             " WHERE source=? AND item_id=? AND status='sent_unrecorded'",
+                             (source, item_id))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            blocked.add(item_id)
+    return blocked
 
 
 # ────────────────────────── 小工具 ──────────────────────────
@@ -287,6 +342,7 @@ def mark_pushed(item_ids, source: str, db_file=None) -> int:
     channel, kind = split_source(source)
     conn = connect(db_file)
     try:
+        legacy_sent_ts = "sent_ts" in {row[1] for row in conn.execute("PRAGMA table_info(pushes)")}
         if source not in _registry(conn):          # 兜底：没注册过也补上，状态别丢
             _set_registry(conn, _registry(conn) + [source])
         changed = 0
@@ -301,8 +357,15 @@ def mark_pushed(item_ids, source: str, db_file=None) -> int:
                 conn.execute("UPDATE items SET pushed=?, rev=COALESCE(rev, 0) + 1 WHERE id=?",
                              (json.dumps(pushed, ensure_ascii=False), item_id))
                 changed += 1
-            conn.execute("INSERT OR IGNORE INTO pushes(item_id, channel, kind, source, sent_at)"
-                         " VALUES(?,?,?,?,?)", (item_id, channel, kind, source, now))
+            if legacy_sent_ts:
+                conn.execute("INSERT OR IGNORE INTO pushes(item_id,channel,kind,source,sent_at,sent_ts)"
+                             " VALUES(?,?,?,?,?,?)", (item_id, channel, kind, source, now, now))
+            else:
+                conn.execute("INSERT OR IGNORE INTO pushes(item_id,channel,kind,source,sent_at)"
+                             " VALUES(?,?,?,?,?)", (item_id, channel, kind, source, now))
+            if conn.execute("SELECT 1 FROM pushes WHERE source=? AND item_id=?",
+                            (source, item_id)).fetchone() is None:
+                raise RuntimeError(f"已发审计未落库 item={item_id} source={source}")
         conn.commit()
         return changed
     finally:

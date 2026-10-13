@@ -102,10 +102,11 @@ HTTP 状态码仍有意义（200 / 400 / 401 / 404 / 500）。写操作要 `X-HX
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/state` | 首屏一次拿全：`services`、`channels`、`stats`、`env_ready`、`configurable`、`ts` |
+| GET | `/api/state` | 首屏一次拿全：`services`、`process_progress`、`channels`、`stats`、`env_ready`、`configurable`、`ts` |
+| GET | `/api/process/backlog` | 唯一完整分析队列中的所有条目（翻译、四灯、标题、分数、标签或正文任一缺失），含缺失字段、尝试次数和重试上限状态；处理卡片剩余条数弹窗使用 |
 | GET | `/api/items?offset=&limit=` | 分页条目 |
 | GET | `/api/snapshot?offset=&limit=&since_id=&since_rev=` | 首屏/加载更多/增量补丁（`incremental` 标记） |
-| GET | `/api/pushes?limit=` | 最近分发记录（`pushes` 表 join items） |
+| GET | `/api/pushes?limit=` | 最近分发尝试（`push_attempts`，含成功/失败与群名）；`pushes` 只保留成功审计 |
 | GET | `/api/channels` | 渠道列表（含每个 target 的待发条数、累计发送数） |
 | GET | `/api/channels/endpoint` | `{"ws_url","token","protocol":1}`；必须带 `X-HX-Token`，不得向未授权访问者泄露 token |
 | GET | `/api/stream` | SSE，每 1 秒 `event: state`，`data:` 同 `/api/state` |
@@ -121,7 +122,7 @@ HTTP 状态码仍有意义（200 / 400 / 401 / 404 / 500）。写操作要 `X-HX
 | POST | `/api/config/alison` | `{values:{APPID,SECRET,SANDBOX,ALISON_WITH_IMAGE,ALISON_DISCOVER_GROUPS}}`；审计只写字段名 |
 | POST | `/api/config/alison/groups/add` | `{group_openid}`：手动补录已知群 OpenID，默认关闭推送 |
 | POST | `/api/config/alison/groups/toggle` | `{group_openid,enabled}`：逐群开关；已退群不能开启 |
-| POST | `/api/config/alison/groups/refresh` | `{}`：用户点击后才调用 QQ 官方 GET `/v2/groups/{group_openid}/info`，后台 30 QPM 刷新已知群（此 API 可能只对白名单机器人开放） |
+| POST | `/api/config/alison/groups/refresh` | `{}` 手动刷新全部已知群；`{"missing_only":true}` 在打开群目录时自动补齐尚未查询的新群资料。后台 30 QPM 调 QQ 官方 GET `/v2/groups/{group_openid}/info`（此 API 可能只对白名单机器人开放） |
 
 QQ 官方文档只提供[按 OpenID 获取指定群信息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_info.get.html)，没有枚举全部已入群群聊的接口。
 群目录通过[机器人入群事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_add_robot.html)、退群事件和群消息维护；
@@ -152,6 +153,7 @@ QQ 官方文档只提供[按 OpenID 获取指定群信息](https://bot.q.qq.com/
 - 顶部栏：标题 + **tab 切换**（`处理` / `分发`）+ 更新时间。
 - **处理** tab：
   - 第一行卡片：`采集服务`、`处理服务`、`运行摘要`（运行摘要顶替原来的"分发服务"卡片位置）。
+  - 处理卡片显示当前处理阶段/条目、剩余待处理数；点击剩余数弹出完整待处理列表，列出缺失灯/字段和重试上限。
   - 下面内容列表**占满 100% 宽度**（原来的右侧 OVERVIEW 栏取消，摘要已在上面）。
 - **分发** tab：渠道卡片（状态徽标、targets、待发、累计发送、最近活动、`启动/停止`、`配置`），
   下面"最近分发记录"表（`/api/pushes`）。

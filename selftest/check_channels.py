@@ -64,6 +64,30 @@ from distribute.ws_channel import ChannelClient  # noqa: E402
 
 ch.DB_FILE = DB
 
+# 旧部署的 pushes 只有 sent_ts/detail，QQ 发成功后曾因缺 source 写库失败。
+legacy_db = SANDBOX / "legacy_pushes.sqlite3"
+legacy = sqlite3.connect(legacy_db)
+legacy.execute("CREATE TABLE items(id INTEGER PRIMARY KEY,decision TEXT,pushed TEXT,rev INTEGER)")
+legacy.execute("INSERT INTO items VALUES(1,'发','{}',1)")
+legacy.execute("INSERT INTO items VALUES(2,'发','{}',1)")
+legacy.execute("CREATE TABLE pushes(id INTEGER PRIMARY KEY,item_id INTEGER,channel TEXT,"
+               "kind TEXT,sent_ts INTEGER,detail TEXT)")
+legacy.execute("INSERT INTO pushes(item_id,channel,kind,sent_ts,detail)"
+               " VALUES(1,'alison','group_abc',123,'旧记录')")
+legacy.commit()
+legacy.close()
+check("旧 pushes 表补齐 source/sent_at 并可标记已发",
+      push_db.mark_pushed([1, 2], "alison:group_abc", db_file=legacy_db) == 2 and
+      push_db.pending("alison:group_abc", db_file=legacy_db) == [])
+legacy = sqlite3.connect(legacy_db)
+check("旧分发记录保留并迁移 source",
+      legacy.execute("SELECT source,sent_at FROM pushes WHERE item_id=1").fetchone() ==
+      ("alison:group_abc", "123"))
+check("旧表的必填 sent_ts 也写入新成功记录",
+      legacy.execute("SELECT sent_ts FROM pushes WHERE source='alison:group_abc'"
+                     " AND item_id=2").fetchone() is not None)
+legacy.close()
+
 conn = sqlite3.connect(DB)
 cdb.ensure_schema(conn)
 for item_id, account, zh in ((1, "SpaceX", "星舰第十次试飞成功"), (2, "NASA", "月球轨道站进展"),
@@ -119,6 +143,15 @@ def wait_for(predicate, timeout: float = 10.0) -> bool:
 def make_client(channel, targets, pull=False, adapter="process"):
     return ChannelClient(channel, channel.title(), targets, host="127.0.0.1", port=PORT,
                          token=TOKEN, adapter=adapter, pull=pull, logger=lambda *a: None)
+
+
+class FakeConnection:
+    def __init__(self):
+        self.sent = []
+
+    def send_json(self, message):
+        self.sent.append(message)
+        return True
 
 
 print("[1] 注册：hello → register_sources → channels 表 → welcome（推送模式）")
@@ -214,6 +247,9 @@ check("回执 ok=false → 条目保持未发",
       pushed_of(4).get("napcat_probe:group_888") is not True, pushed_of(4))
 check("失败不写 pushes",
       scalar("SELECT COUNT(*) FROM pushes WHERE source='napcat_probe:group_888'") == 0)
+check("失败尝试写入分发记录并标明失败",
+      scalar("SELECT COUNT(*) FROM push_attempts WHERE source='napcat_probe:group_888'"
+             " AND status='failed'") == 1)
 
 defer_client = make_client("defer_probe", [{"kind": "group_777", "label": "x"}])
 seen_defer = []
@@ -268,6 +304,41 @@ ch.set_enabled("alison", True, db_file=DB)
 check("重新启用写库", ch.channel_row("alison", db_file=DB)["enabled"] is True)
 check("离线渠道 connected=false",
       [c for c in ch.list_channels(db_file=DB) if c["id"] == "alison"][0]["connected"] is False)
+
+print("[4a] 回执必须匹配当前 source 与 item_id")
+ack_source = "ack_probe:target"
+pull_source = "pull_guard:target"
+push_db.register_sources([ack_source, pull_source], db_file=DB)
+add_item(11, "Ack Guard", "回执匹配测试")
+add_item(12, "Pull Guard", "拉取回执匹配测试")
+ack_session = ch.ChannelSession("ack_probe", "Ack Probe", ch.ADAPTER_PROCESS,
+                                [{"kind": "target", "label": "测试目标"}], FakeConnection())
+wrong_item_reply = {"type": "result", "source": ack_source, "item_id": 12, "ok": True}
+wrong_source_reply = {"type": "result", "source": "other:target", "item_id": 11, "ok": True}
+ack_session._handle_reply(ack_source, {"id": 11, "account": "Ack Guard"}, wrong_item_reply)
+check("推送模式错误 item_id 的成功回执不会误标已发",
+      pushed_of(11).get(ack_source) is not True, pushed_of(11))
+ack_session.acks.put(wrong_source_reply)
+ack_session.acks.put(wrong_item_reply)
+expected_reply = {"type": "result", "source": ack_source, "item_id": 11, "ok": True}
+ack_session.acks.put(expected_reply)
+matched_reply = ack_session._wait_for_reply(ack_source, {"id": 11}, timeout=1)
+check("推送线程跳过 source/item_id 不匹配的迟到回执",
+      matched_reply == expected_reply, matched_reply)
+ack_session._handle_reply(ack_source, {"id": 11, "account": "Ack Guard"}, matched_reply)
+check("正确回执仍能标记当前条目已发",
+      pushed_of(11).get(ack_source) is True, pushed_of(11))
+
+pull_guard_session = ch.ChannelSession(
+    "pull_guard", "Pull Guard", ch.ADAPTER_PLUGIN,
+    [{"kind": "target", "label": "测试目标"}], FakeConnection(), pull=True)
+pull_guard_session.inflight[pull_source] = {12: time.time()}
+pull_guard_session.handle_result(pull_source, 11, True)
+check("拉取模式非在途 item_id 的回执不会误标已发",
+      pushed_of(12).get(pull_source) is not True, pushed_of(12))
+pull_guard_session.handle_result(pull_source, "12", True)
+check("拉取模式在途条目的有效回执正常记账",
+      pushed_of(12).get(pull_source) is True, pushed_of(12))
 
 print("[4b] 空目标渠道可连接，新增群后不用断线即可重注册")
 empty = make_client("empty_probe", [], pull=True)

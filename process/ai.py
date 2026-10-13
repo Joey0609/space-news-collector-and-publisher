@@ -159,9 +159,17 @@ _NEWS_RULES = """- "is_news"【第 1 盏灯】：这条本身是不是一条航�
   航天新闻、官方公告、任务进展、行业动态、故障通报 → true；
   闲聊、个人日常、情绪转发、广告、抽奖、招聘、无实质信息 → false。
 - "not_repeat"【第 2 盏灯】：true = 不是重复内容。
-  如果它是旧闻回顾（周年纪念、"X 年前的今天"、翻旧图）、
-  或者【最近已入库清单】里已经有同一条/同一事件的 → false，
-  并在 "repeat_of" 里写出清单里那条的编号（形如 "#56"；不是重复就给空串 ""）。
+  比较的是具体事实和信息增量，不是账号、关键词、标题相似度或是否属于同一事件。
+  只要本条包含此前新闻没有的新事实、新进展或有实质意义的新细节，就判 true，repeat_of 给空串 ""；
+  即使主体、任务或事件相同，大部分背景与此前新闻重合，也不能因而判重复。
+  新信息包括：新的任务阶段或结果、发射时间/计划变更、新公布的数据或数量、故障原因、修复措施、
+  新合同或参与方、新地点，以及原报道未披露的其他事实。无需是重大进展，有真实信息增量即可。
+  例如：已报道发射预告，随后报道发射成功或入轨结果 → true；已报道试飞成功，随后披露新的试飞数据 → true。
+  只有核心事实已被此前新闻完整覆盖，且没有任何新增事实/进展/实质细节时，才判 false；
+  换一种说法、换账号转载、重复配图、感想、宣传口号、观看链接不构成新增事实。
+  旧闻回顾（周年纪念、"X 年前的今天"、翻旧图）若只复述已知事实 → false；若披露此前没有的新事实，也判 true。
+  【最近已入库清单】可能只有标题，不要凭标题推断旧报道已经包含本条的全部细节；无法确认无信息增量时判 true。
+  只有确认重复时才在 "repeat_of" 写对应清单编号（形如 "#56"）；没有对应条目时给空串，不得编造编号。
 - "not_comment"【第 3 盏灯】：true = 它自己就是内容（原发报道、官方发布、独立消息）。
   如果它是针对**另一条新闻**的评价、吐槽、转发跟评（"这公司又…"、"这事真离谱"）→ false。
   注意：带引用的推文由程序统一放行（见下文【被引用的推文】），你不用为它特意判什么。
@@ -172,8 +180,11 @@ _NEWS_RULES = """- "is_news"【第 1 盏灯】：这条本身是不是一条航�
   · 政客或政府发言、选举、政党、意识形态争论、民族宗教敏感话题
   · 战争、军演、导弹试射这类带军事对抗含义的话题
   注意：正常的商业/科研航天活动（SpaceX 发射、中国航天任务、NASA 公告）→ true，不要误杀。
-- 如果 is_news 是 true，再给下面三项；is_news 是 false 时这三项都给空字符串 ""：
-  · "title"：一句话中文标题，不超过 20 个字，不要带账号名、不要引号
+- 每条内容都必须有非空的 "title"，最多 20 个汉字，不带账号名、书名号或引号。
+  原文若含清楚、准确、适合直接作标题的标题，优先复用（英文标题译成中文）；没有合适标题、太长或只是口号/链接时，依据正文重写。
+  标题只概括核心内容，优先写主体/任务和关键动作或结果；以清理后的 zh 为准并用原文核对，不能臆造。
+  忽略问候、宣传口号、邀请提问、直播引导、重复解释、无关背景和纯链接；账号会由发送格式单独附在标题后。
+- 仅当 is_news 是 true 时，生成下面两项；is_news 是 false 时 summary 和 importance 给空字符串：
   · "summary"：1~2 句中文要点，不超过 60 个字，说清"谁做了什么、结果/时间/数字"
   · "importance"：重要度，只取 高 / 中 / 低 三个字之一
     高 = 首飞/载人/深空/里程碑/重大故障；中 = 常规发射、合同订单、型号进展；低 = 科普、花絮、旧闻回顾
@@ -193,33 +204,54 @@ _TAG_RULES = """- "tags"：3~6 个简体中文标签，必须含一个领域标�
   · 其余标签写事件、机构、型号等关键词，每个不超过 8 个字，写法 "机构:SpaceX"
 """
 
+_BODY_RULES = """正文整合规则（适用于 zh / clean_zh）：
+- 正文应把主帖和实际提供的所有引用内容融合成一篇连贯、完整的正文；引用可以在原文中，也可以在【被引用的推文】中。
+  不要照搬“文本 + 引用1：（链接）【引用内容1】 + 引用2：（链接）【引用内容2】”的拼接结构，
+  不输出“引用1/引用2/被引用内容/译文”等结构标签、包裹引用的括号或引用链接。
+- 融合不是概括或摘要：保留各部分全部有效信息、事实、数字、条件、限定语和必要背景，不把多个具体句子压缩成一句要点。
+  正文长度以保留信息为准，没有 summary 的字数限制；summary 单独生成，不能拿 summary 替代正文。
+- 尽量保留原句的表述、语气和细节：中文通顺的句子直接沿用，英文逐句忠实翻译；只做必要的衔接、语序调整和重复事实合并。
+  特殊情况才改写：原句生硬或不通顺、零散字段需成句、指代脱离引用后不明、相同事实重复，或需清除链接和结构噪声。
+  不能为使文字简短而删掉有效信息；不能把不同主体的说法混成同一个人的陈述，必要时保留“某机构表示”等归属。
+- 只使用本条主帖和实际提供的引用正文。不要从最近已入库清单借用事实，也不要猜测链接里没有提供的内容。
+"""
+
 ANALYSIS_PROMPT = (
     "你是航天内容处理助手。下面是一条 X（推特）推文原文，请一次完成下面这些事。\n"
     "只输出一个 JSON 对象：不要 Markdown 代码块，不要任何解释、前后缀或多余文字。\n\n"
-    "- \"zh\"：把原文翻译成简体中文。保留 Falcon 9、Starship 等专有名词原文；链接、@、# 原样保留；\n"
-    "  不要加\"译文：\"之类的前缀，也不要加引号。\n"
-    "- \"quoted_zh\"：如果给了【被引用的推文】，把**它的正文**也翻译成简体中文放这里\n"
-    "  （和 zh 一样的要求）；没有【被引用的推文】就给空字符串 \"\"。\n"
+    "- \"zh\"：输出忠实、通顺的简体中文正文。合适的原文/译文表述直接保留；英文翻译成中文，专有名词可保留英文。\n"
+    "  如果原文生硬、是直播状态或零散字段，整理成一条自然的新闻正文；保留主体、事实、数字和有意义的时间/地点，不得补造信息。\n"
+    "  删除 t.co/短链/追踪链接、直播观看引导、空 location 字段、重复口号、无关背景及 \"Information as of\" 状态时间。\n"
+    "  正文不留裸 URL；来源原链接由系统单独保存。不要加\"译文：\"前缀。\n"
+    "- \"quoted_zh\"：如果给了【被引用的推文】，把它的正文另译成简体中文放这里供归档；\n"
+    "  其中有效信息必须同时融入 zh，不能只放 quoted_zh 而使实际发送的 zh 缺失引用信息；没有引用就给空字符串 \"\"。\n"
     "- 判断时要把【被引用的推文】的内容一起算进去（被引用的那条往往才是新闻本体）。\n"
+    + _BODY_RULES + "\n"
     + _NEWS_RULES + "\n"
     + _TAG_RULES + "\n"
     "输出格式（严格 JSON）：\n"
-    '{"zh":"译文","quoted_zh":"被引用正文的译文（没有引用就给空串）",'
+    '{"zh":"整理后的完整译文正文","quoted_zh":"被引用正文的译文（没有引用就给空串）",'
     '"is_news":true,"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
     '"title":"星舰第 11 次试飞成功","summary":"SpaceX 完成星舰第 11 次试飞，飞船再入后在海上溅落。",'
     '"importance":"高","score":92,"tags":["领域:发射","对象:星舰","机构:SpaceX"]}\n\n'
     "{known}{source}{quoted}原文：\n{raw}"
 )
 
-# 存量条目补标用：已经有译文了，只补判断 + 四盏灯 + 三件套 + 价值分 + 标签，不重新翻译（也不覆盖人工改过的译文）
+# 存量条目补标用：不重新翻译；标题缺失时补标题，正文有链接/状态噪声时才清理
 META_PROMPT = (
     "你是航天内容处理助手。下面是一条**已经翻译过**的航天推文（原文和译文都给你）。\n"
-    "不要翻译，只做判断和打标。只输出一个 JSON 对象：不要 Markdown 代码块，不要任何解释或前后缀。\n\n"
+    "不要重新翻译。只输出一个 JSON 对象：不要 Markdown 代码块，不要任何解释或前后缀。\n"
+    "必须返回 \"clean_zh\"：现有译文准确通顺且干净时逐字复用；否则只做必要整理，成为忠实自然的新闻正文。\n"
+    "保留事实、数字、主体和有意义的时间/地点；清除 t.co/短链、直播观看引导、空 location 字段、\n"
+    "重复口号、无关背景及 \"Information as of\" 状态时间；正文不留裸 URL，不得补造信息。\n"
+    "标题必须非空且不超过 20 个汉字；原文有合适标题就沿用（英文译成中文），否则依据正文生成。\n\n"
+    + _BODY_RULES + "\n"
     + _NEWS_RULES + "\n"
     + _TAG_RULES + "\n"
     "输出格式（严格 JSON）：\n"
     '{"is_news":true,"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
-    '"title":"星舰第 11 次试飞成功","summary":"……","importance":"高","score":92,'
+    '"title":"星舰第11次试飞成功","clean_zh":"星舰完成第11次试飞。",'
+    '"summary":"……","importance":"高","score":92,'
     '"tags":["领域:发射","对象:星舰"]}\n\n'
     "{known}{source}{quoted}原文：\n{raw}\n\n译文：\n{zh}"
 )
@@ -264,7 +296,7 @@ def _known_block(known_titles) -> str:
     if not lines:
         return ""
     body = "\n".join(lines)
-    return ("【最近已入库清单】（判断 not_repeat 用：和这里某条是同一件事就算重复）\n"
+    return ("【最近已入库清单】（仅供事实对比：同一事件有新增事实/进展/实质细节就不重复；标题相似不足以判重复）\n"
             f"{body}\n\n")
 
 
@@ -292,13 +324,78 @@ def _find_json_object(text: str) -> dict:
         try:
             obj, _ = decoder.raw_decode(text[start:])
         except ValueError:
-            start = text.find("{", start + 1)
-            continue
+            # 有些模型会把个别 JSON 键写成裸键或多一个右引号（如
+            # `quoted_zh:"",is_news":false`）。只在字符串外修复对象键，
+            # 避免误改正文中的逗号、冒号或字段名。
+            repaired = _quote_unquoted_json_keys(text[start:])
+            try:
+                obj, _ = decoder.raw_decode(repaired)
+            except ValueError:
+                start = text.find("{", start + 1)
+                continue
         if isinstance(obj, dict):
             return obj
         start = text.find("{", start + 1)
     snippet = re.sub(r"\s+", " ", str(text or "")).strip()
     raise ValueError(f"模型输出不是合法 JSON：{snippet or '(空)'}")
+
+
+def _quote_unquoted_json_keys(text: str) -> str:
+    """修复 JSON 对象里裸键或键尾多余引号，不触碰字符串值。"""
+    out = []
+    i = 0
+    in_string = False
+    escaped = False
+    expect_key = False
+    while i < len(text):
+        char = text[i]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            expect_key = False
+            out.append(char)
+            i += 1
+            continue
+        if char in "{,":
+            expect_key = True
+            out.append(char)
+            i += 1
+            continue
+        if expect_key and char.isspace():
+            out.append(char)
+            i += 1
+            continue
+        if expect_key and (char.isalpha() or char == "_"):
+            end = i + 1
+            while end < len(text) and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            after = end
+            while after < len(text) and text[after].isspace():
+                after += 1
+            extra_quote = after < len(text) and text[after] == '"'
+            colon_at = after + 1 if extra_quote else after
+            while colon_at < len(text) and text[colon_at].isspace():
+                colon_at += 1
+            if colon_at < len(text) and text[colon_at] == ":":
+                out.extend(('"', text[i:end], '"'))
+                i = after + 1 if extra_quote else end
+                expect_key = False
+                continue
+        if char == ":":
+            expect_key = False
+        out.append(char)
+        i += 1
+    return "".join(out)
 
 
 def _to_flag(value):
@@ -337,6 +434,36 @@ def _clean_tags(value) -> list:
 def _clean_text(value) -> str:
     """标题/要点这类短文本：压空白、去引号。不截断——长度由提示词约束，不由代码砍。"""
     return re.sub(r"\s+", " ", str(value or "")).strip().strip("\"'“”").strip()
+
+
+def clean_zh_body(value) -> str:
+    """清理正文里的短链、直播引导和状态字段，不改写其余事实内容。"""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"(?i)(?:https?://|www\.)\S+", "", text)
+    text = re.sub(r"(?i)\bInformation\s+as\s+of\s+\d{4}-\d{1,2}-\d{1,2}"
+                  r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?\s*UTC)?\b", "", text)
+    text = re.sub(r"(?i)(?:▶️\s*)?(?:直播观看|观看直播|收看直播|watch\s+live|live\s+stream)"
+                  r"\s*[:：]?", "", text)
+    text = re.sub(r"(?im)(^|[\s，,。；;])(?:location|位置)\s*[:：]\s*(?=$|[\s，,。；;])",
+                  r"\1", text)
+    text = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b(?=\s*(?:location\s*[:：]|$))",
+                  "", text, flags=re.I)
+    text = re.sub(r"(?:→|->)+", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    lines = [re.sub(r"\s+", " ", line).strip(" \t,，;；→-") for line in text.split("\n")]
+    text = "\n".join(line for line in lines if line)
+    text = re.sub(r"\s+([，。；：！？,.!?])", r"\1", text)
+    return text.strip()
+
+
+def _ensure_title(value, body: str) -> str:
+    """Enforce a non-empty title no longer than 20 characters."""
+    title = _clean_text(value)
+    if not title:
+        content = clean_zh_body(body)
+        title = re.split(r"[。！？.!?\n]", content, maxsplit=1)[0].strip()
+    title = re.sub(r"\s+", "", title).strip("，。；：、,.!?！？-— ")
+    return title[:20] or "航天动态"
 
 
 _IMPORTANCE_MAP = {
@@ -385,10 +512,15 @@ def _pick(data: dict, *keys):
 
 def _meta_fields(data: dict) -> dict:
     """四盏灯 + 标题/要点/重要度/价值分 + 标签（+ 被引用正文的译文），完整分析和只补标共用。"""
+    repeat_of = _clean_text(_pick(data, "repeat_of", "重复于"))
+    not_repeat = _to_flag(_pick(data, "not_repeat", "不重复"))
+    # 按提示词契约，只有重复时才填写 repeat_of；两者冲突时以明确的重复编号为准。
+    if repeat_of:
+        not_repeat = False
     return {
         "is_news": _to_flag(_pick(data, "is_news", "新闻")),
-        "not_repeat": _to_flag(_pick(data, "not_repeat", "不重复")),
-        "repeat_of": _clean_text(_pick(data, "repeat_of", "重复于")),
+        "not_repeat": not_repeat,
+        "repeat_of": repeat_of,
         "not_comment": _to_flag(_pick(data, "not_comment", "不是评价", "非评价")),
         "not_sensitive": _to_flag(_pick(data, "not_sensitive", "不敏感", "非敏感政治")),
         "title": _clean_text(_pick(data, "title", "标题")),
@@ -397,7 +529,7 @@ def _meta_fields(data: dict) -> dict:
         "score": _clean_score(_pick(data, "score", "分数", "价值分")),
         "tags": _clean_tags(_pick(data, "tags", "标签") or []),
         # 被引用推文正文的译文；没有引用时模型会给空串
-        "quoted_zh": _clean_text(_pick(data, "quoted_zh", "引用译文", "被引用译文")),
+        "quoted_zh": clean_zh_body(_pick(data, "quoted_zh", "引用译文", "被引用译文")),
     }
 
 
@@ -409,25 +541,44 @@ def parse_analysis(output: str) -> dict:
     译文缺失直接抛：调用方会记 translate_error 并重试，绝不把空译文写进库。
     """
     data = _find_json_object(output)
-    zh = str(data.get("zh") or data.get("译文") or "").strip()
+    zh = clean_zh_body(data.get("zh") or data.get("译文") or "")
     if not zh:
         raise ValueError("模型没有返回译文（zh 为空）")
+    if not _clean_text(_pick(data, "title", "标题")):
+        raise ValueError("完整分析缺少 AI 标题")
     result = {"zh": zh}
     result.update(_meta_fields(data))
+    lights = ("is_news", "not_repeat", "not_comment", "not_sensitive")
+    missing_lights = [key for key in lights if result[key] is None]
+    if missing_lights:
+        raise ValueError("完整分析缺少必需的灯: " + ", ".join(missing_lights))
+    if not result["tags"]:
+        raise ValueError("完整分析缺少标签")
+    if result["score"] is None:
+        raise ValueError("完整分析缺少 AI 价值分")
+    result["title"] = _ensure_title(result.get("title"), zh)
     return result
 
 
-def parse_meta(output: str) -> dict:
+def parse_meta(output: str, existing_zh: str = "") -> dict:
     """解析"只判断不翻译"的回复；四盏灯和标签都拿不到就算失败（宁可重试）。"""
-    meta = _meta_fields(_find_json_object(output))
+    data = _find_json_object(output)
+    meta = _meta_fields(data)
+    meta["clean_zh"] = clean_zh_body(data.get("clean_zh") or data.get("zh") or "")
     lights = ("is_news", "not_repeat", "not_comment", "not_sensitive")
-    if all(meta[key] is None for key in lights) and not meta["tags"]:
-        raise ValueError("模型既没给四盏灯也没给标签")
+    missing_lights = [key for key in lights if meta[key] is None]
+    if missing_lights:
+        raise ValueError("补标缺少必需的灯: " + ", ".join(missing_lights))
+    if not meta["tags"]:
+        raise ValueError("补标缺少标签")
+    if meta["score"] is None:
+        raise ValueError("补标缺少 AI 价值分")
+    meta["title"] = _ensure_title(meta.get("title"), meta.get("clean_zh") or existing_zh)
     return meta
 
 
 def analyze_item(text: str, account: str = "", known_titles=None,
-                 quoted_account: str = "", quoted_raw: str = "") -> dict:
+                 quoted_account: str = "", quoted_raw: str = "", repair_hint: str = "") -> dict:
     """一次调用拿齐：译文 + 四盏灯 + 标题/要点/重要度 + 标签。失败向上抛，由调用方记账重试。
 
     known_titles 是"最近已入库清单"（形如 ["#56 标题", ...]），用来判第 2 盏灯（不重复）。
@@ -437,6 +588,18 @@ def analyze_item(text: str, account: str = "", known_titles=None,
     if not is_configured():
         raise RuntimeError("模型 API 未配置完整，缺少：" + "、".join(missing_config()))
     prompt = build_analysis_prompt(text, account, known_titles, quoted_account, quoted_raw)
+    if repair_hint:
+        prompt += (
+            "\n\n【格式修复要求】上一次完整分析未通过校验：" + str(repair_hint) + "。"
+            "请重新分析同一条原文并只返回一个语法正确的 JSON 对象，不要加 Markdown 代码围栏或解释。"
+            "每个字段名和每个字符串值都必须使用英文双引号；布尔值只能写 true 或 false，不要给键名多加或漏掉引号。"
+            "所有字段都必须出现，特别是 not_repeat 必须是 true 或 false，不能省略、不能填文字说明。"
+            "字段至少包括 zh、is_news、not_repeat、repeat_of、not_comment、not_sensitive、title、"
+            "summary、importance、score、tags；不要把重复编号填进 not_repeat，编号只写在 repeat_of。"
+            '严格照此语法形状输出：{"zh":"...","quoted_zh":"","is_news":true,'
+            '"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
+            '"title":"...","summary":"...","importance":"中","score":50,"tags":["领域:其他"]}。'
+        )
     return parse_analysis(chat(prompt, temperature=0.3))
 
 
@@ -450,7 +613,7 @@ def analyze_meta(text: str, zh: str = "", account: str = "", known_titles=None,
     if not is_configured():
         raise RuntimeError("模型 API 未配置完整，缺少：" + "、".join(missing_config()))
     prompt = build_meta_prompt(text, zh, account, known_titles, quoted_account, quoted_raw)
-    return parse_meta(chat(prompt, temperature=0.0))
+    return parse_meta(chat(prompt, temperature=0.0), existing_zh=zh)
 
 
 # ---------------------------------------------------------------- 打标 / 兜底（失败吞掉）

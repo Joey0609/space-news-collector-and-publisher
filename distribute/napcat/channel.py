@@ -59,9 +59,11 @@ def send_sync(item: dict) -> dict:
     cfg = config()
     if not cfg["url"] or not cfg["target"]:
         return {"ok": False, "detail": "NapCat 未配置（NAPCAT_WS_URL / NAPCAT_TARGET_QQ）"}
-    text = str(item.get("zh") or item.get("raw") or "").strip()
-    if not text:
+    body = str(item.get("zh") or item.get("raw") or "").strip()
+    if not body:
         return {"ok": False, "detail": "条目没有可发正文"}
+    title = str(item.get("ai_title") or "").strip()
+    text = "\n\n".join(part for part in (title, body) if part)
 
     async def run() -> dict:
         try:

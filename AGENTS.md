@@ -15,7 +15,7 @@ config/        人维护配置，不入库
 
 ## Python 环境
 
-所有看板托管服务固定使用根目录 `.venv\Scripts\python.exe`，不要使用系统全局 Python。项目环境已安装 `twscrape`、`openai`、`httpx`、`python-dotenv`、`websockets`；QQ SDK 源码位于 `distribute/alison/botpy/`，不依赖外部 `qq-botpy` 安装包。采集配置来自根 `.env`；`WATCH_ACCOUNT` 为空时默认使用 `Space_Alioth`，`COOKIES_PATH` 为空时会给出明确文件路径错误。
+所有看板托管服务固定使用根目录 `.venv\Scripts\python.exe`，不要使用系统全局 Python。项目环境已安装 `twscrape`、`openai`、`httpx`、`python-dotenv`、`websockets`；QQ SDK 源码位于 `distribute/alison/botpy/`，不依赖外部 `qq-botpy` 安装包。登录、代理和扫描节奏配置来自根 `.env`；X 遍历账号唯一来源为 `collect/sources/x/x_accounts.csv`，UTF-8（支持 BOM），表头为 `名字,性质`。名字填用户名（可带 @）；性质允许暂留空，分类仅 `official` / `media` / `photographer` / `enthusiast` / `others`，目前采集按名字列读取，每轮重新读取。`official` 包含官方机构、项目及公司官方；未提供分类的保留账号暂标 `others`。名单缺失、为空或格式错误时明确报错，不回退到关注列表。旧 `WATCH_ACCOUNT` / `NEWS_ACCOUNTS` 配置不再生效。`COOKIES_PATH` 为空时会给出明确文件路径错误。
 
 
 
@@ -121,7 +121,7 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 
 - `collect/news_fetch.py`：采集入口。
 - `collect/hx_core/scan.py`：分批、游标、增量、视频跳过。
-- `collect/hx_core/x_client.py`：cookies、twscrape、关注列表、最新推文。
+- `collect/sources/x/x_client.py`：cookies、twscrape、读取同目录的 `x_accounts.csv`、按用户名查询最新推文。
 - `collect/hx_core/images.py`：下载 X 原图。
 - `collect/sources/`：未来源适配器；X 当前稳定实现仍由 `hx_core/scan.py` 执行。
 

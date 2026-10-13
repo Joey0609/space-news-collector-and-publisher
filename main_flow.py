@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import argparse
+import json
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent
@@ -41,6 +42,20 @@ OUTPUT_DIR = RAW_DIR
 
 LOG_FILE = LOG_DIR / "main_flow.log"
 log = make_log(LOG_FILE)
+PROCESS_PROGRESS_FILE = ROOT / "data" / "state" / "process_progress.json"
+
+
+def write_processing_stage(phase: str, running: bool = True) -> None:
+    """Keep the dashboard phase current between translate, judge, and fallback modules."""
+    payload = {"running": bool(running), "phase": phase, "current": None,
+               "index": 0, "total": 0}
+    try:
+        PROCESS_PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = PROCESS_PROGRESS_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, PROCESS_PROGRESS_FILE)
+    except OSError as exc:
+        log(f"[进度] 看板进度写入失败: {exc}")
 
 # Project-local interpreter is mandatory for the pipeline.
 PROJECT_PY = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -105,17 +120,23 @@ def cleanup_old_outputs(keep: int = 3) -> None:
 
 def run_processing() -> bool:
     """只处理最近一次采集结果，不重复触发采集。"""
+    write_processing_stage("正在准备翻译和点灯")
     success = True
-    run_module("translate_db.py")
-    success = run_module("judge.py") and success
-    success = run_module("ai_fallback.py") and success
-    if not success:
-        log("[错误] 处理阶段存在失败")
-        return False
-    should = should_send_count()
-    log(f"[结果] 库里判定'发'共 {should} 条；{queue_describe()}")
-    log(f"[结果] 待分发 {queue_pending_count()} 条（分发端直接读库，不写队列文件）")
-    cleanup_old_outputs()
+    try:
+        run_module("translate_db.py")
+        write_processing_stage("正在按四盏灯和规则判定")
+        success = run_module("judge.py") and success
+        write_processing_stage("正在进行 AI 兜底判定")
+        success = run_module("ai_fallback.py") and success
+        if not success:
+            log("[错误] 处理阶段存在失败")
+            return False
+        should = should_send_count()
+        log(f"[结果] 库里判定'发'共 {should} 条；{queue_describe()}")
+        log(f"[结果] 待分发 {queue_pending_count()} 条（分发端直接读库，不写队列文件）")
+        cleanup_old_outputs()
+    finally:
+        write_processing_stage("本轮处理结束", running=False)
 
 
 def main() -> None:

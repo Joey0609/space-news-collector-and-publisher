@@ -12,6 +12,11 @@ import sys
 import time
 from pathlib import Path
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -27,6 +32,26 @@ COMMANDS = {
     "process": [str(PROJECT_PYTHON), str(ROOT / "main_flow.py"), "--process-only"],
 }
 INTERVALS = {"collect": 600, "process": 60}
+
+
+def acquire_instance_lock(name: str):
+    """Prevent two dashboard instances from running the same database loop concurrently."""
+    lock_dir = ROOT / "data" / "state"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    handle = (lock_dir / f"service_{name}.lock").open("a+b")
+    try:
+        if os.name == "nt":
+            if handle.seek(0, os.SEEK_END) == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+    except OSError:
+        handle.close()
+        return None
 
 
 def configured_interval(name: str) -> int:
@@ -58,6 +83,10 @@ def main() -> None:
     if name not in {"collect", "process"}:
         raise SystemExit("usage: service_runner.py collect|process"
                          "（分发已改为渠道，见 dashboard/PROTOCOL.md）")
+    lock = acquire_instance_lock(name)
+    if lock is None:
+        print(f"[{name}] 已有同类服务在运行，本实例退出以避免重复处理", flush=True)
+        return
     while True:
         run_command(name)
         time.sleep(configured_interval(name))

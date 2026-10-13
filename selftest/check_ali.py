@@ -72,12 +72,17 @@ for name in ("send_test.py", "send_botpy.py", "try_variants.py"):
 
 print("[3] 排版与挑选")
 item = {"account": "SpaceX", "orig_account": "NASA", "zh": "星舰发射成功", "raw": "Starship",
-        "date": "2026-09-18 12:00:00", "ts": 1789000000, "score": 70,
+        "ai_title": "星舰试飞成功", "date": "2026-09-18 12:00:00", "ts": 0, "score": 70,
         "images": ["a.jpg", "b.jpg"], "image": "a.jpg", "forward_comment": "值得一看"}
 src = render.build_source_line(item)
 check("来源行用原帖作者+北京时间", src.startswith("来源：@NASA · X · UTC+8-"), src)
 text = render.build_text(item)
-check("正文含来源/译文/转发评论", src in text and "星舰发射成功" in text and "转发@SpaceX：值得一看" in text, text)
+check("艾莉森格式为标题-作者、译文、短北京时间",
+      text == "星舰试飞成功 - NASA\n星舰发射成功\n2026.09.18 20:00", text)
+check("正文不再附来源行/转发评论/引用块",
+      "来源：" not in text and "转发@" not in text and "【引用" not in text, text)
+fallback_text = render.build_text({"account": "esa", "zh": "正文", "date": "2026-10-13 08:23:00"})
+check("旧数据标题缺失时安全回退", fallback_text == "正文 - esa\n正文\n2026.10.13 16:23", fallback_text)
 check("images 优先列表", render.item_images(item) == ["a.jpg", "b.jpg"])
 check("images 回退单图", render.item_images({"image": "c.jpg"}) == ["c.jpg"])
 # 挑选：候选已经是"本通道还没发过的"（见 push_queue.pending），这里只按 带图/分数 选

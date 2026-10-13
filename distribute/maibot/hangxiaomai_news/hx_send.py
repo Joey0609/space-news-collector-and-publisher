@@ -160,8 +160,9 @@ class SendMixin:
         translation = str(item.get("zh") or item.get("raw") or "").strip()
         if not translation:
             return False
+        title = str(item.get("ai_title") or "").strip()
         source = build_source_line(item)
-        text1 = (source + "\n\n" + translation) if source else translation
+        text1 = "\n\n".join(part for part in (title, source, translation) if part)
         fwd = forward_line(item, self.ctx.logger)
         if fwd:
             text1 += "\n\n" + fwd

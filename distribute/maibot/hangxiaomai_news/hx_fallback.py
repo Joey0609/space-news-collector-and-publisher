@@ -68,9 +68,10 @@ class FallbackMixin:
         # 目录（各条 来源行 + 译文；转推附转发者评论）
         lines = []
         for it in top_items:
+            title = str(it.get("ai_title") or "").strip()
             src = build_source_line(it)
             body = str(it.get("zh") or it.get("raw") or "").strip()
-            line = (src + "\n" + body) if src else body
+            line = "\n".join(part for part in (title, src, body) if part)
             fl = forward_line(it, self.ctx.logger)
             if fl:
                 line += "\n" + fl
@@ -86,7 +87,8 @@ class FallbackMixin:
             f"{persona}\n\n你在执行用户交给你的任务：帮用户把他想看的航天内容挑出来并推送。"
             "下面是你今天挑出的、值得看的内容，请按条分成几点、每点一行，用你平时说话的方式简单说几句，"
             "别写成一整段、别太长。\n\n内容：\n"
-            + "\n".join(f"- {(str(it.get('zh') or it.get('raw') or ''))[:80]}" for it in top_items),
+            + "\n".join(f"- {str(it.get('ai_title') or '').strip()}："
+                         f"{(str(it.get('zh') or it.get('raw') or ''))[:80]}" for it in top_items),
             temperature=0.7, logger=self.ctx.logger,
         ) or "今天给你挑了几条航天内容，配图发你，感兴趣可以看看～"
 

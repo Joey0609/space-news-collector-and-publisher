@@ -14,6 +14,7 @@ STATE_DIR = DATA_DIR / "state"
 MARKDOWN_DIR = DATA_DIR / "markdown"
 OUTPUT_DIR = RAW_DIR                         # compatibility name for old collect code
 CONFIG_DIR = ROOT / "config"
+X_ACCOUNTS_FILE = SEED_DIR / "sources" / "x" / "x_accounts.csv"
 
 PENDING_FILE = QUEUE_DIR / "待推送.json"
 SENT_FILE = QUEUE_DIR / "已发记录.json"

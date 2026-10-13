@@ -42,6 +42,13 @@
                     </div>
                     <div class="actions"><button data-service="process">启动</button><button class="secondary"
                             data-config="process">配置</button></div>
+                    <div class="process-progress">
+                        <div class="process-progress__label">当前进度</div>
+                        <p id="process-progress-current" aria-live="polite">处理服务尚未运行</p>
+                        <button id="process-backlog-open" class="secondary process-backlog-open" type="button">
+                            剩余 <b id="process-remaining">0</b> 条 · 点击查看列表
+                        </button>
+                    </div>
                 </article>
                 <article class="service-card summary-card">
                     <div class="service-card__head"><span class="service-icon">摘</span>
@@ -99,6 +106,7 @@
                                 <th>时间</th>
                                 <th>渠道</th>
                                 <th>目标</th>
+                                <th>结果</th>
                                 <th>条目标题</th>
                             </tr>
                         </thead>
@@ -142,6 +150,17 @@
             <button id="detail-delete" class="danger">删除此条推文</button>
         </footer>
     </dialog>
+    <dialog id="process-backlog-dialog" class="process-backlog-dialog" aria-labelledby="process-backlog-title">
+        <header class="detail-head">
+            <div class="detail-head__text">
+                <span class="eyebrow">PROCESS QUEUE</span>
+                <h2 id="process-backlog-title">待处理内容</h2>
+                <p id="process-backlog-summary" class="process-backlog-summary"></p>
+            </div>
+            <button id="process-backlog-close" class="close" type="button" aria-label="关闭">×</button>
+        </header>
+        <div id="process-backlog-list" class="process-backlog-list" aria-live="polite"></div>
+    </dialog>
     <dialog id="config-dialog">
         <div class="detail-head">
             <div><span class="eyebrow">SERVICE SETTINGS</span>
@@ -169,14 +188,13 @@
                         <label class="alison-field"><span>APPID</span><input name="APPID" type="text" autocomplete="off" spellcheck="false"></label>
                         <label class="alison-field"><span>SECRET</span><input name="SECRET" type="text" autocomplete="off" spellcheck="false"></label>
                         <label class="alison-field"><span>SANDBOX</span><select name="SANDBOX" id="alison-sandbox"><option value="false">正式环境</option><option value="true">沙箱环境</option></select></label>
-                        <label class="alison-switch-row"><span><strong>ALISON_WITH_IMAGE</strong><small>推送时附带图片</small></span><input name="ALISON_WITH_IMAGE" type="checkbox" role="switch"></label>
-                        <label class="alison-switch-row"><span><strong>ALISON_DISCOVER_GROUPS</strong><small>自动记录入/退群及可接收的群消息；发送始终使用 QQ 长连接</small></span><input name="ALISON_DISCOVER_GROUPS" type="checkbox" role="switch"></label>
+                        <div class="alison-options"><label class="alison-switch-row"><span><strong>ALISON_WITH_IMAGE</strong><small>推送时附带图片</small></span><input name="ALISON_WITH_IMAGE" type="checkbox" role="switch"></label>
+                        <label class="alison-switch-row"><span><strong>ALISON_DISCOVER_GROUPS</strong><small>自动记录入/退群及可接收的群消息；发送始终使用 QQ 长连接</small></span><input name="ALISON_DISCOVER_GROUPS" type="checkbox" role="switch"></label></div>
                     </div>
                     <div class="alison-save-row"><span id="alison-save-state" role="status" aria-live="polite"></span><button id="alison-save" type="submit">保存机器人设置</button></div>
                 </form>
                 <section class="alison-groups" aria-labelledby="alison-groups-title">
                     <div class="alison-section-head"><div><span class="eyebrow">KNOWN GROUPS</span><h3 id="alison-groups-title">已知群目录 <span id="alison-group-count"></span></h3></div><button id="alison-refresh" type="button" class="secondary">刷新群信息</button></div>
-                    <p id="alison-discovery-note" class="alison-note">收到群消息会自动登记新群；如需监听未 @ 的普通消息，请在每个 QQ 群的机器人设置开启「获取群内全部消息」并确认具备全量事件权限。</p>
                     <div id="alison-progress" class="alison-progress" role="status" aria-live="polite" hidden></div>
                     <div id="alison-groups-list" class="alison-groups-list"></div>
                     <form id="alison-add-form" class="alison-add-form"><label for="alison-group-openid">手动添加群 OpenID</label><div><input id="alison-group-openid" name="group_openid" type="text" placeholder="输入 group_openid" autocomplete="off" spellcheck="false" required><button id="alison-add" type="submit" class="secondary">添加群</button></div><span id="alison-add-state" role="status" aria-live="polite"></span></form>

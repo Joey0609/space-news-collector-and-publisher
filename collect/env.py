@@ -10,7 +10,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .paths import ROOT, SEED_DIR
+from .paths import ROOT, SEED_DIR, X_ACCOUNTS_FILE
 
 # New canonical location is the repository root; collect/.env is accepted during P1.
 load_dotenv(ROOT / ".env", encoding="utf-8")
@@ -20,9 +20,6 @@ load_dotenv(SEED_DIR / ".env", encoding="utf-8")
 PROXY_URL = os.getenv("PROXY_URL", "").strip()
 _cookie_path = os.getenv("COOKIES_PATH", "").strip()
 COOKIES_PATH = Path(_cookie_path) if _cookie_path else (ROOT / "data" / "state" / "cookies.txt")
-_watch_account = os.getenv("WATCH_ACCOUNT", "").strip()
-WATCH_ACCOUNT = _watch_account or "Space_Alioth"
-NEWS_ACCOUNTS = [x.strip() for x in os.getenv("NEWS_ACCOUNTS", "").split(",") if x.strip()]
 # 要启用哪些采集源（逗号分隔）；留空 = 跑 collect/sources/ 下所有已注册的源
 ENABLED_SOURCES = [x.strip() for x in os.getenv("SOURCES", "").split(",") if x.strip()]
 
@@ -33,9 +30,8 @@ def config_summary() -> dict:
         "proxy_configured": bool(PROXY_URL),
         "cookies_path": str(COOKIES_PATH),
         "cookies_exists": COOKIES_PATH.is_file(),
-        "watch_account": WATCH_ACCOUNT,
-        "watch_account_from_default": not bool(_watch_account),
-        "explicit_accounts": len(NEWS_ACCOUNTS),
+        "accounts_file": str(X_ACCOUNTS_FILE),
+        "accounts_file_exists": X_ACCOUNTS_FILE.is_file(),
         "enabled_sources": ENABLED_SOURCES or ["(全部已注册的源)"],
     }
 
@@ -44,7 +40,6 @@ CHECK_PER_ACCOUNT = 3        # 每账号取最近几条判定"最新"（少取�
 SCAN_BATCH = int(os.getenv("SCAN_BATCH", "40") or 40)   # 每轮扫描账号数
 PAUSE_SECONDS = float(os.getenv("PAUSE_SECONDS", "1.0") or 1.0)  # 每账号间暂停秒数
 MAX_CONSECUTIVE_FAIL = 8     # 连续失败超过此值视为被限流，停下轮续扫
-FOLLOW_LIMIT = 500           # 关注列表拉取上限（覆盖 170+）
 
 # ---- 目标（推送默认对象，可被 配置/*.toml 覆盖）----
 DEFAULT_TARGET_PRIVATE = "YOUR_QQ_ID"

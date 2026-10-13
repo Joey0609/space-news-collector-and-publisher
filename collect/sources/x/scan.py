@@ -18,19 +18,20 @@ from collect.logging_util import one_line
 from .images import download_image
 from collect.db import upsert_raw
 from collect.store import load_baseline, load_cursor, save_baseline, save_cursor
+from .link_preview import append_tco_references
 from .tweet_utils import extract_forward_comment, get_content_type, get_media_urls, has_video
 from .x_client import build_api, gather_accounts, get_latest_tweet, load_cookie_header
 
 
 async def run_scan(log: Callable[[str], None] = print) -> list:
     """跑一轮增量抓取，返回本轮新增条目列表（同时写好 new_news_*.json）。"""
-    cookie = load_cookie_header(log)
-    api = await build_api(cookie)
-
-    accounts = await gather_accounts(api, log)
+    accounts = await gather_accounts(None, log)
     if not accounts:
         log("[结果] 没有可抓取的账号")
         return []
+
+    cookie = load_cookie_header(log)
+    api = await build_api(cookie)
 
     # ---- 分批扫描 ----
     total = len(accounts)
@@ -142,14 +143,15 @@ def _build_new_item(name: str, latest, ts: int, baseline: dict,
             log(f"[新增] @{name} 更新但无文本内容，仅更新基线")
         return None
 
-    # 图片：先下引用者自己的图，再下被引用推文的图（接在后面、合并进同一个列表），
-    # 这样分发端和看板都不用改就能用上引用图。
+    # 图片：先下引用者自己的图，再下外链文章图、被引用推文图片，
+    # 都放入同一个附件列表，分发端和看板无需另改。
     day = str(latest.date)[:10].replace("-", "") if getattr(latest, "date", None) else ""
     images = []
     for i, mu in enumerate(get_media_urls(eff)):
         p = download_image(latest.id, mu, i, log, day=day)
         if p:
             images.append(p)
+    raw = append_tco_references(raw, log, tweet_id=latest.id, day=day, images=images)
     quoted_media = get_media_urls(qt) if qt is not None else []
     if quoted_media:
         log(f"[引用图] @{name} 更新 {latest.id} 被引用推文带 {len(quoted_media)} 张图，一并下载")

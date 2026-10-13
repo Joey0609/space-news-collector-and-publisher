@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:      # 队列口径在 distribute/push_db.py（直
     sys.path.insert(0, str(ROOT))
 DATA = ROOT / "data"
 STATE = DATA / "state"
+PROCESS_PROGRESS_FILE = STATE / "process_progress.json"
 LOGS = ROOT / "logs"
 WEB = ROOT / "dashboard" / "webui"
 TOKEN_FILE = STATE / "dashboard_token.txt"
@@ -36,7 +37,7 @@ PROCESSES: dict[str, subprocess.Popen] = {}
 # 服务 = 看板固定托管的那两个循环；分发改为"渠道"（见 /api/channels 与 channels.py）
 SERVICE_NAMES = {"collect": "采集", "process": "处理"}
 CONFIG_FIELDS = {
-    "collect": ["PROXY_URL", "COOKIES_PATH", "WATCH_ACCOUNT", "NEWS_ACCOUNTS", "SCAN_BATCH", "PAUSE_SECONDS", "COLLECT_INTERVAL_SECONDS"],
+    "collect": ["PROXY_URL", "COOKIES_PATH", "SCAN_BATCH", "PAUSE_SECONDS", "COLLECT_INTERVAL_SECONDS"],
     "process": ["MODEL_PROTOCOL", "MODEL_API_BASE", "MODEL_NAME", "MODEL_API_KEY", "MODEL_TIMEOUT", "MODEL_MAX_TOKENS", "AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES", "TRANSLATE_RATE_LIMIT_WAIT", "TRANSLATE_PAUSE_SECONDS", "PROCESS_INTERVAL_SECONDS"],
 }
 CHANNEL_KEY_PREFIX = "channel:"
@@ -290,6 +291,130 @@ def services() -> dict:
     return result
 
 
+_ANALYSIS_NEEDS_WORK = """(
+       COALESCE(is_news, -1) = -1 OR COALESCE(not_repeat, -1) = -1
+    OR COALESCE(not_comment, -1) = -1 OR COALESCE(not_sensitive, -1) = -1
+    OR COALESCE(ai_score, -1) = -1 OR TRIM(COALESCE(ai_tags, '')) = ''
+    OR TRIM(COALESCE(ai_title, '')) = ''
+    OR instr(lower(COALESCE(zh, '')), 'http://') > 0
+    OR instr(lower(COALESCE(zh, '')), 'https://') > 0
+    OR instr(lower(COALESCE(zh, '')), 'www.') > 0
+    OR instr(lower(COALESCE(zh, '')), 'information as of') > 0
+    OR instr(lower(COALESCE(zh, '')), 'location:') > 0
+    OR instr(COALESCE(zh, ''), '直播观看') > 0
+)"""
+
+
+def _max_process_attempts() -> int:
+    try:
+        return max(1, int(env_values().get("TRANSLATE_MAX_ATTEMPTS", "3")))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _read_process_progress() -> dict:
+    try:
+        value = json.loads(PROCESS_PROGRESS_FILE.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def process_backlog(include_items: bool = True) -> dict:
+    """唯一完整分析队列：翻译、四灯和所有 AI 元数据必须一次齐全。"""
+    db = DATA / "hx.sqlite3"
+    if not db.exists():
+        return {"items": [], "remaining_count": 0, "ready_count": 0, "stuck_count": 0}
+    max_attempts = _max_process_attempts()
+    needs_work = f"((zh IS NULL OR TRIM(zh) = '' OR zh = ?) OR {_ANALYSIS_NEEDS_WORK})"
+    try:
+        conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
+        required = {"id", "raw", "zh", "translate_attempts", "is_news", "not_repeat",
+                    "not_comment", "not_sensitive", "ai_score", "ai_tags", "ai_title"}
+        if not required <= columns:
+            conn.close()
+            return {"items": [], "remaining_count": 0, "ready_count": 0, "stuck_count": 0}
+        if not include_items:
+            rows = conn.execute(
+                "SELECT COALESCE(translate_attempts,0) AS attempts FROM items "
+                "WHERE raw IS NOT NULL AND TRIM(raw) <> '' AND " + needs_work,
+                ("[未配置 key]",),
+            ).fetchall()
+            conn.close()
+            ready_count = sum(1 for item in rows if int(item["attempts"]) < max_attempts)
+            return {"items": [], "remaining_count": len(rows), "ready_count": ready_count,
+                    "stuck_count": len(rows) - ready_count}
+        rows = conn.execute(
+            "SELECT id, origin_id, account, raw, zh, stage, ai_title, ai_score, ai_tags, "
+            "is_news, not_repeat, not_comment, not_sensitive, translate_attempts, translate_error, ts "
+            "FROM items WHERE raw IS NOT NULL AND TRIM(raw) <> '' AND " + needs_work +
+            " ORDER BY COALESCE(ts, 0) DESC, id DESC",
+            ("[未配置 key]",),
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        print(f"[看板] 处理队列读取失败: {exc}", flush=True)
+        return {"items": [], "remaining_count": 0, "ready_count": 0, "stuck_count": 0}
+
+    items = []
+    ready_count = stuck_count = 0
+    for row in rows:
+        item = dict(row)
+        missing = []
+        if not item.get("zh") or item["zh"] == "[未配置 key]":
+            missing.append("译文")
+        for field, label in (("is_news", "新闻"), ("not_repeat", "重复"),
+                             ("not_comment", "评价"), ("not_sensitive", "敏感")):
+            if item.get(field) is None:
+                missing.append(label)
+        if item.get("ai_score") is None:
+            missing.append("AI分")
+        if not str(item.get("ai_tags") or "").strip():
+            missing.append("标签")
+        if not str(item.get("ai_title") or "").strip():
+            missing.append("标题")
+        body = str(item.get("zh") or "")
+        if any(marker in body.lower() for marker in ("http://", "https://", "www.", "information as of", "location:")) or "直播观看" in body:
+            missing.append("正文清理")
+        attempts = int(item.get("translate_attempts") or 0)
+        stuck = attempts >= max_attempts
+        if stuck:
+            stuck_count += 1
+        else:
+            ready_count += 1
+        items.append({
+            "id": item.get("id"), "origin_id": item.get("origin_id"),
+            "account": item.get("account") or "未知账号",
+            "title": str(item.get("ai_title") or "").strip(),
+            "raw": str(item.get("raw") or "")[:240],
+            "stage": item.get("stage") or "", "phase": "待完整分析",
+            "missing": missing, "attempts": attempts, "max_attempts": max_attempts,
+            "stuck": stuck, "error": str(item.get("translate_error") or "")[:240],
+        })
+
+    return {"items": items, "remaining_count": len(items),
+            "ready_count": ready_count, "stuck_count": stuck_count}
+
+
+def process_progress() -> dict:
+    backlog = process_backlog(include_items=False)
+    progress = _read_process_progress()
+    running = bool(services().get("process", {}).get("running"))
+    active = bool(running and progress.get("running"))
+    return {
+        "running": active,
+        "phase": progress.get("phase") if active else ("等待下一轮" if running else "已停止"),
+        "current": progress.get("current") if active else None,
+        "index": progress.get("index", 0) if active else 0,
+        "total": progress.get("total", 0) if active else 0,
+        "remaining_count": backlog["remaining_count"],
+        "ready_count": backlog["ready_count"],
+        "stuck_count": backlog["stuck_count"],
+    }
+
+
 def channel_process_running(channel_id: str) -> bool:
     with LOCK:
         process = PROCESSES.get(channel_key(channel_id))
@@ -314,6 +439,7 @@ def state() -> dict:
             channel["running"] = channel_process_running(channel["id"])
     return {
         "services": services(),
+        "process_progress": process_progress(),
         "channels": channel_list,
         "stats": {
             "item_count": total,
@@ -334,6 +460,7 @@ def summary() -> dict:
     stats = data["stats"]
     return {
         "services": data["services"],
+        "process_progress": data["process_progress"],
         "channels": data["channels"],
         "item_count": stats["item_count"],
         "latest_id": stats["latest_id"],
@@ -687,6 +814,8 @@ class Handler(BaseHTTPRequestHandler):
                 offset, limit = self.query_int("offset", 0), self.query_int("limit", 20) or 20
                 return self.ok({"items": all_items(offset, limit), "offset": offset,
                                 "limit": limit, "total": item_stats()[0]})
+            if path == "/api/process/backlog":
+                return self.ok(process_backlog())
             if path == "/api/channels":
                 return self.ok({"channels": state()["channels"]})
             if path == "/api/channels/endpoint":
@@ -768,7 +897,7 @@ class Handler(BaseHTTPRequestHandler):
                                               "enabled": group["push_enabled"]})
                 return self.ok({"group": group})
             if path == "/api/config/alison/groups/refresh":
-                result = alison_config.start_refresh()
+                result = alison_config.start_refresh(missing_only=payload.get("missing_only") is True)
                 audit("alison_groups_refresh", {"total": result["total"]})
                 return self.ok({"refresh": result})
             if path in ("/api/config", "/api/service/config"):

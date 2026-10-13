@@ -1129,10 +1129,17 @@ dialog::backdrop {
 .item:hover { background: #f8fbff }
 .item-main { min-width: 0; padding-right: 0 }
 .item-preview { margin-top: 6px; line-height: 1.65; white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden }
+.item-provenance { display: grid; grid-template-columns: minmax(0,2fr) repeat(2,minmax(0,1fr)); gap: 10px 18px; margin-top: 10px; color: var(--muted); font-size: 12px }
+.item-provenance > div { min-width: 0; display: flex; align-items: baseline; gap: 4px; white-space: nowrap }
+.item-provenance span { flex: 0 0 auto; font-size: 11px; color: #687991 }
+.item-provenance a, .item-provenance time { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.item-provenance em { font-style: normal }
 .source-link{display:block;max-width:100%;margin-top:9px;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.source-link:hover{text-decoration:none}.source-url{color:var(--blue);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:2px}.source-url:hover{color:#1d4ed8}
 .thumb { float: none; width: 150px; height: 110px; object-fit: cover; border-radius: 10px; margin: 0; align-self: start }
 
 @media(max-width:640px) {
+    .item-provenance { grid-template-columns: 1fr 1fr }
+    .item-provenance > div:first-child { grid-column: 1 / -1 }
     .detail-head { padding: 16px 18px 14px }
     .detail-head h2 { font-size: 19px }
     .detail-scroll { padding: 14px 18px 18px }
@@ -1155,6 +1162,98 @@ dialog::backdrop {
     padding: 9px 0;
     font-size: 13px
 }
+
+.process-progress {
+    margin-top: 17px;
+    padding-top: 13px;
+    border-top: 1px dashed var(--line)
+}
+
+.process-progress__label {
+    color: #31415c;
+    font-size: 12px;
+    font-weight: 750
+}
+
+#process-progress-current {
+    min-height: 34px;
+    margin: 5px 0 10px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-wrap: anywhere
+}
+
+.process-backlog-open {
+    width: 100%;
+    justify-content: center;
+    font-size: 12px
+}
+
+.process-backlog-open.has-stuck {
+    border-color: #f2c178;
+    color: #9a5b00;
+    background: #fff8e9
+}
+
+#process-backlog-dialog[open] {
+    display: flex;
+    flex-direction: column
+}
+
+.process-backlog-summary {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 13px
+}
+
+.process-backlog-list {
+    overflow: auto;
+    padding: 10px 22px 22px
+}
+
+.process-backlog-item {
+    padding: 14px 4px;
+    border-bottom: 1px solid var(--line)
+}
+
+.process-backlog-item:last-child { border-bottom: 0 }
+.process-backlog-item.is-stuck { background: #fffaf0 }
+
+.process-backlog-item__head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px
+}
+
+.process-backlog-item__head strong {
+    min-width: 0;
+    color: #26354d;
+    font-size: 14px;
+    overflow-wrap: anywhere
+}
+
+.process-backlog-item__head span {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 11px
+}
+
+.process-backlog-item.is-stuck .process-backlog-item__head span,
+.process-backlog-item__error { color: #b45309 }
+
+.process-backlog-item__meta,
+.process-backlog-item__error,
+.process-backlog-empty {
+    margin: 7px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-wrap: anywhere
+}
+
+.process-backlog-item__error { color: #b45309 }
 
 /* 摘要里的小字：各渠道一行状态 */
 .channel-brief {
@@ -1452,6 +1551,10 @@ dialog::backdrop {
     text-align: center;
     padding: 22px 0
 }
+.push-status { display: inline-block; padding: 2px 7px; border-radius: 5px; font-size: 11px; font-weight: 700; white-space: nowrap }
+.push-status.is-success { color: #146c3b; background: #e9f7ee }
+.push-status.is-failed { color: #9d2b35; background: #fff0f0 }
+.push-detail { display: block; max-width: 260px; margin-top: 4px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere }
 
 /* ============ 小提示（替代 alert） ============ */
 .toasts {
@@ -1514,6 +1617,9 @@ dialog::backdrop {
 .alison-field input, .alison-field select, .alison-add-form input { width: 100%; min-width: 0; height: 40px; padding: 0 11px; border: 1px solid #cdd8e8; border-radius: 7px; background: #fff; color: #1e2a3b; font: inherit; font-size: 14px }
 .alison-field input:focus-visible, .alison-field select:focus-visible, .alison-add-form input:focus-visible, .alison-dialog button:focus-visible, .alison-dialog input[type=checkbox]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px }
 .alison-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 65px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #fbfdff; cursor: pointer }
+.alison-options { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px }
+.alison-options .alison-switch-row { min-width: 0; width: 100%; min-height: 68px; white-space: normal }
+.alison-options .alison-switch-row span { display: grid; gap: 4px }
 .alison-switch-row span { display: grid; gap: 4px; min-width: 0 }
 .alison-switch-row strong { font-size: 12px; overflow-wrap: anywhere }
 .alison-switch-row small { color: var(--muted); font-size: 12px }
@@ -1525,7 +1631,6 @@ dialog::backdrop {
 .alison-dialog button:disabled { opacity: .55; cursor: wait; transform: none; box-shadow: none }
 .alison-save-row { display: flex; justify-content: flex-end; align-items: center; gap: 12px; min-height: 63px; color: #1f7a45; font-size: 12px }
 .alison-groups { padding-top: 20px; border-top: 1px solid var(--line) }
-.alison-note { margin: 0 0 14px; padding: 11px 13px; border: 1px solid #dbe8fa; border-radius: 8px; background: #f5f9ff; color: #465b78; font-size: 12px; line-height: 1.6 }
 .alison-progress { margin: 0 0 12px; color: #2857ae; font-size: 12px; font-weight: 650 }
 .alison-groups-list { display: grid; gap: 10px }
 .alison-group-card { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff }
@@ -1543,6 +1648,8 @@ dialog::backdrop {
 .alison-empty { margin: 0; padding: 20px; border: 1px dashed #cdd8e8; border-radius: 8px; color: var(--muted); font-size: 13px; line-height: 1.6; text-align: center }
 .alison-add-form { display: grid; gap: 8px; margin-top: 16px; color: #31415c; font-size: 12px; font-weight: 650 }
 .alison-add-form > div { display: flex; gap: 8px }
+.alison-add-form input { flex: 1 1 auto }
+.alison-add-form button { flex: 0 0 auto; white-space: nowrap; min-width: 78px }
 .alison-add-form > span { min-height: 14px; color: #1f7a45; font-weight: 400 }
 @media(max-width:640px) {
   .channel-actions { width: 100%; justify-content: stretch }
@@ -1551,11 +1658,12 @@ dialog::backdrop {
   .alison-head { padding: 17px 16px }
   .alison-scroll { padding: 17px 16px 22px }
   .alison-fields { grid-template-columns: 1fr }
+  .alison-options { grid-template-columns: 1fr }
   .alison-section-head { align-items: flex-start }
   .alison-section-head button { flex: 0 0 auto; padding: 8px 10px }
   .alison-group-top { flex-wrap: wrap }
-  .alison-add-form > div { flex-wrap: wrap }
-  .alison-add-form button { width: 100% }
+  .alison-add-form > div { flex-wrap: nowrap }
+  .alison-add-form button { width: auto }
 }
 @media(prefers-reduced-motion:reduce) {
     .alison-dialog[open], .alison-dialog[open].is-closing,

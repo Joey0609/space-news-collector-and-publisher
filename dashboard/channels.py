@@ -62,6 +62,22 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _item_id_key(value):
+    """Normalize JSON integer IDs without accepting floats or booleans."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text and (text.isdigit() or (text[0] == "-" and text[1:].isdigit())):
+            try:
+                return int(text)
+            except ValueError:
+                return None
+    return None
+
+
 # ────────────────────────── 数据库 ──────────────────────────
 
 def connect(db_file=None) -> sqlite3.Connection:
@@ -216,14 +232,16 @@ def sent_counts(db_file=None) -> dict:
 
 
 def recent_pushes(limit: int = 20, db_file=None) -> list:
-    """最近分发记录（pushes 表 join items 拿标题）。"""
+    """最近分发尝试：成功和失败都展示，艾莉森目标显示群名。"""
     conn = connect(db_file)
     try:
         rows = conn.execute(
-            "SELECT p.item_id, p.channel, p.kind, p.source, p.sent_at,"
-            " i.account, i.zh, i.ai_title FROM pushes p"
-            " LEFT JOIN items i ON i.id = p.item_id"
-            " ORDER BY p.sent_at DESC, p.id DESC LIMIT ?", (max(1, int(limit)),)).fetchall()
+            "SELECT p.item_id,p.channel,p.kind,p.source,p.attempted_at,p.status,p.detail,"
+            " i.account,i.zh,i.ai_title,g.group_name"
+            " FROM push_attempts p LEFT JOIN items i ON i.id=p.item_id"
+            " LEFT JOIN alison_groups g ON p.channel='alison'"
+            " AND g.group_openid=substr(p.kind,7)"
+            " ORDER BY p.id DESC LIMIT ?", (max(1, int(limit)),)).fetchall()
     except sqlite3.Error:
         return []
     finally:
@@ -233,7 +251,9 @@ def recent_pushes(limit: int = 20, db_file=None) -> list:
         title = str(row["ai_title"] or "").strip() or str(row["zh"] or "").strip()[:40]
         out.append({
             "item_id": row["item_id"], "channel": row["channel"], "kind": row["kind"],
-            "source": row["source"], "sent_at": row["sent_at"],
+            "source": row["source"], "sent_at": row["attempted_at"],
+            "status": row["status"], "detail": row["detail"],
+            "label": row["group_name"] or ("群资料查询中…" if row["channel"] == "alison" else row["kind"]),
             "account": row["account"], "zh": row["zh"], "title": title,
         })
     return out
@@ -324,7 +344,8 @@ class ChannelSession:
         self.connection = connection
         self.pull = bool(pull)                    # True = 渠道按自己的节奏 want，服务端不主动推
         self.acks: queue.Queue = queue.Queue()
-        self.defer_until: dict = {}               # source -> 时间戳
+        self.defer_until: dict = {}               # source -> 渠道主动延后时间
+        self.retry_after: dict = {}               # (source, item_id) -> 失败后重试时间
         self.inflight: dict = {}                  # source -> {item_id: 时间}（want 出去还没回执的）
         self.status = "idle"
         self.alive = True
@@ -394,33 +415,46 @@ class ChannelSession:
         except (TypeError, ValueError):
             limit = 1
         try:
-            items = push_db.pending(source=source)
+            blocked = push_db.reconcile_deliveries(source)
+            items = [item for item in push_db.pending(source=source) if item["id"] not in blocked]
         except Exception as exc:
             self.send({"type": "error", "error": f"读队列失败：{exc}"})
             return
-        picked = items[:limit]
         now = time.time()
         slot = self.inflight.setdefault(source, {})
-        for item in picked:
-            slot[item["id"]] = now
         # 在途太久（渠道拿了却没回执）就清掉，免得永远不再给它
         for item_id in [key for key, at in slot.items() if now - at > 600]:
             slot.pop(item_id, None)
+        in_flight_ids = set(slot)
+        picked = [item for item in items
+                  if _item_id_key(item.get("id")) not in in_flight_ids][:limit]
+        for item in picked:
+            item_id = _item_id_key(item.get("id"))
+            if item_id is not None:
+                slot[item_id] = now
         self.send({"type": "items", "source": source, "items": picked})
 
     def handle_result(self, source: str, item_id, ok: bool, detail: str = "") -> None:
         """拉取模式的回执：直接落库（推送模式走 acks 队列，由推送线程处理）。"""
         if source not in self.sources:
             return
-        self.inflight.get(source, {}).pop(item_id, None)
+        item_key = _item_id_key(item_id)
+        slot = self.inflight.get(source, {})
+        if item_key is None or item_key not in slot:
+            print(f"[渠道:{self.id}] 忽略非在途回执 {source} item={item_id}", flush=True)
+            return
+        slot.pop(item_key, None)
         if not ok:
+            self._record_attempt(source, item_id, "failed", detail or "未说明")
             print(f"[渠道:{self.id}] {source} 条目 {item_id} 发送失败：{detail or '未说明'}", flush=True)
             return
         try:
             push_db.mark_pushed([item_id], source)
+            self._record_attempt(source, item_id, "success")
             self.send({"type": "ack", "source": source, "item_id": item_id})
             print(f"[渠道:{self.id}] 已发 {source} item={item_id}", flush=True)
         except Exception as exc:
+            self._record_attempt(source, item_id, "sent_unrecorded", str(exc))
             print(f"[渠道:{self.id}] 标记已发失败 item={item_id}: {exc}", flush=True)
 
     # ── 推送循环 ──
@@ -447,21 +481,32 @@ class ChannelSession:
                 if time.time() < self.defer_until.get(source, 0.0):
                     continue
                 try:
+                    unrecorded = push_db.reconcile_deliveries(source)
                     items = push_db.pending(source=source)
                 except Exception as exc:          # 库暂时读不了：等下一轮
                     print(f"[渠道:{self.id}] 读队列失败: {exc}", flush=True)
                     break
                 if not items:
                     continue
-                item = items[0]
+                now = time.time()
+                pending_ids = {entry["id"] for entry in items}
+                for key in list(self.retry_after):
+                    if key[0] == source and key[1] not in pending_ids:
+                        self.retry_after.pop(key, None)
+                item = next((entry for entry in items
+                             if entry["id"] not in unrecorded and
+                             now >= self.retry_after.get((source, entry["id"]), 0.0)), None)
+                if item is None:
+                    continue
                 if not self.send({"type": "item", "source": source, "item": item}):
                     self.alive = False
                     break
                 worked = True
                 try:
-                    reply = self.acks.get(timeout=ACK_TIMEOUT)
+                    reply = self._wait_for_reply(source, item, ACK_TIMEOUT)
                 except queue.Empty:
-                    self._backoff(source, TIMEOUT_BACKOFF)
+                    self._retry_later(source, item["id"], TIMEOUT_BACKOFF)
+                    self._record_attempt(source, item["id"], "failed", "渠道回执超时")
                     print(f"[渠道:{self.id}] {source} 条目 {item['id']} 回执超时，"
                           f"{TIMEOUT_BACKOFF:.0f}s 后重试", flush=True)
                     continue
@@ -471,8 +516,33 @@ class ChannelSession:
         self.alive = False
         print(f"[渠道:{self.id}] 推送线程结束", flush=True)
 
-    def _backoff(self, source: str, seconds: float) -> None:
-        self.defer_until[source] = time.time() + max(0.0, float(seconds))
+    def _wait_for_reply(self, source: str, item: dict, timeout: float) -> dict:
+        """Ignore stale/mismatched replies and wait for this item's own result."""
+        item_id = _item_id_key(item.get("id"))
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise queue.Empty
+            reply = self.acks.get(timeout=remaining)
+            kind = str(reply.get("type") or "")
+            if kind in ("_closed", "_paused"):
+                return reply
+            reply_source = str(reply.get("source") or "")
+            reply_id = _item_id_key(reply.get("item_id"))
+            if kind in ("result", "defer") and reply_source == source and reply_id == item_id:
+                return reply
+            print(f"[渠道:{self.id}] 忽略不匹配回执 type={kind or '?'} "
+                  f"source={reply_source or '?'} item={reply.get('item_id')}", flush=True)
+
+    def _retry_later(self, source: str, item_id: int, seconds: float) -> None:
+        self.retry_after[(source, item_id)] = time.time() + max(0.0, float(seconds))
+
+    def _record_attempt(self, source: str, item_id: int, status: str, detail: str = "") -> None:
+        try:
+            push_db.record_attempt(item_id, source, status, detail)
+        except Exception as exc:
+            print(f"[渠道:{self.id}] 分发记录写入失败 item={item_id}: {exc}", flush=True)
 
     def _handle_reply(self, source: str, item: dict, reply: dict) -> None:
         kind = str(reply.get("type") or "")
@@ -481,13 +551,23 @@ class ChannelSession:
             return
         if kind == "_paused":
             return
+        if kind in ("result", "defer") and (
+                str(reply.get("source") or "") != source
+                or _item_id_key(reply.get("item_id")) != _item_id_key(item.get("id"))):
+            # Defensive guard: this method must never mark a different item sent,
+            # even if a future caller bypasses _wait_for_reply().
+            print(f"[渠道:{self.id}] 忽略不匹配回执 source={reply.get('source')} "
+                  f"item={reply.get('item_id')}；当前={source} item={item.get('id')}", flush=True)
+            return
         if kind == "result" and reply.get("ok"):
             try:
                 push_db.mark_pushed([item["id"]], source)
-            except Exception as exc:              # 写库失败：别谎报成功，稍后重推
-                self._backoff(source, TIMEOUT_BACKOFF)
+            except Exception as exc:              # QQ 已发但写库失败：禁止重发，避免重复刷屏
+                self._record_attempt(source, item["id"], "sent_unrecorded", str(exc))
+                self._retry_later(source, item["id"], float("inf"))
                 print(f"[渠道:{self.id}] 标记已发失败 item={item['id']}: {exc}", flush=True)
                 return
+            self._record_attempt(source, item["id"], "success")
             self.send({"type": "ack", "source": source, "item_id": item["id"]})
             print(f"[渠道:{self.id}] 已发 {source} item={item['id']} "
                   f"@{item.get('account') or '?'}", flush=True)
@@ -498,12 +578,13 @@ class ChannelSession:
             except (TypeError, ValueError):
                 seconds = TIMEOUT_BACKOFF
             seconds = min(max(seconds, DEFER_MIN), DEFER_MAX)
-            self._backoff(source, seconds)
+            self.defer_until[source] = time.time() + seconds
             print(f"[渠道:{self.id}] {source} 条目 {item['id']} 延后 {seconds:.0f}s"
                   f"（{reply.get('reason') or '未说明'}）", flush=True)
             return
         if kind == "result":
-            self._backoff(source, FAIL_BACKOFF)
+            self._retry_later(source, item["id"], FAIL_BACKOFF)
+            self._record_attempt(source, item["id"], "failed", str(reply.get("detail") or "未说明"))
             print(f"[渠道:{self.id}] {source} 条目 {item['id']} 发送失败："
                   f"{reply.get('detail') or '未说明'}；{FAIL_BACKOFF:.0f}s 后重试", flush=True)
             return

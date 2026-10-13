@@ -32,7 +32,7 @@ CHANNEL = "alison"
 def enabled_targets() -> list:
     """Only enabled member groups are registered as distribution targets."""
     return [{"kind": f"group_{row['group_openid']}",
-             "label": row["group_name"] or f"群 {row['group_openid'][:12]}"}
+             "label": row["group_name"] or "群资料查询中…"}
             for row in list_groups(enabled_only=True)]
 
 

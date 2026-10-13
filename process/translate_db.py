@@ -1,42 +1,13 @@
-# -*- coding: utf-8 -*-
-"""航小麦 · 翻译+判定+价值分+标签 (模块2-A · translate_db.py)
-==========================================================
-处理服务每一轮开始时都会跑一次本入口，它干两件事（都在库里自动补齐）：
+"""航小麦 · 完整内容分析（模块 2-A）
+=====================================
+每条内容只有一个处理队列。缺译文、四灯、AI分、标题、标签或正文清理项时，都重新调用同一个完整分析：
+译文 zh / 四盏灯 / AI 价值分 / ai_title / 摘要 / 重要度 / 标签一次生成并校验齐全后才落库。
 
-  ① 完整分析：把"没译文 / 译文还是旧占位符 / 上次翻译失败"的条目一次模型调用做完
-       译文 zh / 四盏灯 is_news·not_repeat·not_comment·not_sensitive / AI 价值分 ai_score /
-       标题 ai_title / 要点 ai_summary / 重要度 importance / 标签 ai_tags
-  ② 存量补标：已经有译文、但"缺灯 / 缺分 / 缺标签"的条目
-       只补四盏灯 + AI 分 + 标题/要点/重要度 + 标签（**不重新翻译、不覆盖人工改过的译文**），
-       用完 meta_attempts 记账
-
-四盏灯：① 是新闻 ② 不重复（判第 2 盏灯时会带上"最近已入库标题清单"给模型对比）
-③ 非评价（不是对另一条新闻的吐槽/跟评）④ 非敏感政治（政治/外交红线）。
-judge 里四绿直接放行，任一红直接丢。
-
-**缺什么就重做什么**（两路合起来覆盖全部三种情况）：
-  - 缺译文（zh 空 / 旧占位符 / 翻译失败）→ 第 ① 遍完整重做；
-  - 缺灯、缺 AI 分、缺标签（但有译文）→ 第 ② 遍重做判断，译文一个字不动；
-  - 判定（丢/发）不在这里做：judge 看四盏灯，再看 AI 分/规则分。
-
-失败不会中断整轮：逐条写错误与尝试次数，并立即提交，所以进程被中断也不会丢进度。
-
-"这条要不要重新完整翻译"只看三件事（PENDING_SQL）：
-    ① raw 非空；
-    ② translate_attempts < TRANSLATE_MAX_ATTEMPTS（默认 3，只有永久失败才 +1；429/超时不算）；
-    ③ zh 还是空的（NULL / 空串），或者是旧版本留下的 "[未配置 key]" 占位符。
-**有译文的条目不会重新翻译**——包括人工在看板改过的、以及"翻译成功过但还留着旧错误信息"的，
-所以再跑多少轮也不会覆盖已经写好的译文；缺灯/缺分由第 ② 遍补，同样不碰 zh。
-补标那一路（META_PENDING_SQL）另有自己的计数 meta_attempts，条件同样独立。
-
-stage 只在 stage='collected' 时推进到 'translated'；已经进入后续阶段的条目只补字段、不回退 stage，
-避免被 judge 重复判定。补标这一路完全不改 stage。
-
-用法：
-    python process/translate_db.py              # 新条目分析 + 存量补标
-    python process/translate_db.py --meta-only  # 只补标（不碰新条目）
-"""
+分析失败不会把灰灯当成功；逐条记录错误与尝试次数，达到上限的记录仍留在看板列表中。
+临时网络错误与限流不消耗永久失败次数。
+judge.py 只处理完整分析成功写入 translated 的记录。"""
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -48,7 +19,7 @@ for _path in (_ROOT, _PROCESS):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from ai import analyze_item, analyze_meta, config_summary, is_configured  # noqa: E402
+from ai import analyze_item, config_summary, is_configured  # noqa: E402
 from config import (  # noqa: E402
     AI_REPEAT_CONTEXT,
     TRANSLATE_INLINE_RETRIES,
@@ -66,51 +37,65 @@ log = make_log(LOG_DIR / "translate.log")
 
 # 旧版本在没配 key 时会把这句话写进 zh，当成"没翻译"看待，本轮补翻。
 PLACEHOLDER = "[未配置 key]"
+PROGRESS_FILE = _ROOT / "data" / "state" / "process_progress.json"
 
-PENDING_SQL = """
+
+def write_progress(running: bool, phase: str, item: dict | None = None,
+                   index: int = 0, total: int = 0) -> None:
+    """给看板记录处理阶段和当前条目；写状态失败不影响处理主流程。"""
+    current = None
+    if item:
+        current = {
+            "id": item.get("id"),
+            "account": str(item.get("account") or ""),
+            "title": str(item.get("ai_title") or "").strip(),
+            "raw": str(item.get("raw") or "")[:240],
+        }
+    payload = {
+        "running": bool(running),
+        "phase": str(phase or ""),
+        "current": current,
+        "index": int(index or 0),
+        "total": int(total or 0),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = PROGRESS_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, PROGRESS_FILE)
+    except OSError as exc:
+        log(f"[进度] 看板进度写入失败: {one_line(str(exc))}")
+
+# 一条完整分析队列：任意必需字段缺失，都用同一调用重新产出译文、四灯和元数据。
+_ANALYSIS_NEEDED = ("(zh IS NULL OR TRIM(zh) = '' OR zh = '{placeholder}' "
+                    "OR COALESCE(is_news, -1) = -1 OR COALESCE(not_repeat, -1) = -1 "
+                    "OR COALESCE(not_comment, -1) = -1 OR COALESCE(not_sensitive, -1) = -1 "
+                    "OR COALESCE(ai_score, -1) = -1 OR TRIM(COALESCE(ai_tags, '')) = '' "
+                    "OR TRIM(COALESCE(ai_title, '')) = '' "
+                    "OR instr(lower(COALESCE(zh, '')), 'http://') > 0 "
+                    "OR instr(lower(COALESCE(zh, '')), 'https://') > 0 "
+                    "OR instr(lower(COALESCE(zh, '')), 'www.') > 0 "
+                    "OR instr(lower(COALESCE(zh, '')), 'information as of') > 0 "
+                    "OR instr(lower(COALESCE(zh, '')), 'location:') > 0 "
+                    "OR instr(COALESCE(zh, ''), '直播观看') > 0)").format(placeholder=PLACEHOLDER)
+
+PENDING_SQL = f"""
     SELECT id, account, raw, stage, quoted_account, quoted_raw,
            COALESCE(translate_attempts, 0) AS attempts
       FROM items
      WHERE raw IS NOT NULL AND TRIM(raw) <> ''
        AND COALESCE(translate_attempts, 0) < ?
-       AND (
-             zh IS NULL OR TRIM(zh) = '' OR zh = ?
-           )
+       AND {_ANALYSIS_NEEDED}
      ORDER BY COALESCE(ts, 0) DESC, id DESC
 """
 
-STUCK_SQL = """
+STUCK_SQL = f"""
     SELECT COUNT(*)
       FROM items
      WHERE raw IS NOT NULL AND TRIM(raw) <> ''
        AND COALESCE(translate_attempts, 0) >= ?
-       AND (zh IS NULL OR TRIM(zh) = '' OR TRIM(COALESCE(translate_error, '')) <> '')
-"""
-
-# 存量补标：有译文，但"四盏灯没点齐 / 没有 AI 分 / 没有标签"——这三样缺一个就重做一遍判断
-_META_NEEDED = ("(COALESCE(is_news, -1) = -1 OR COALESCE(not_repeat, -1) = -1 "
-                "OR COALESCE(not_comment, -1) = -1 OR COALESCE(not_sensitive, -1) = -1 "
-                "OR COALESCE(ai_score, -1) = -1 "
-                "OR TRIM(COALESCE(ai_tags, '')) = '')")
-
-META_PENDING_SQL = f"""
-    SELECT id, account, raw, zh, quoted_account, quoted_raw,
-           COALESCE(meta_attempts, 0) AS attempts
-      FROM items
-     WHERE raw IS NOT NULL AND TRIM(raw) <> ''
-       AND zh IS NOT NULL AND TRIM(zh) <> '' AND zh <> ?
-       AND COALESCE(meta_attempts, 0) < ?
-       AND {_META_NEEDED}
-     ORDER BY COALESCE(ts, 0) DESC, id DESC
-"""
-
-META_STUCK_SQL = f"""
-    SELECT COUNT(*)
-      FROM items
-     WHERE raw IS NOT NULL AND TRIM(raw) <> ''
-       AND zh IS NOT NULL AND TRIM(zh) <> ''
-       AND COALESCE(meta_attempts, 0) >= ?
-       AND {_META_NEEDED}
+       AND {_ANALYSIS_NEEDED}
 """
 
 
@@ -147,21 +132,13 @@ def is_transient(exc: Exception) -> bool:
 
 def pending_rows(conn, max_attempts: int) -> list[dict]:
     """本轮要做完整分析（翻译+判断+标签）的条目：新条目 + 失败的条目。"""
-    return [dict(r) for r in conn.execute(PENDING_SQL, (max_attempts, PLACEHOLDER)).fetchall()]
+    return [dict(r) for r in conn.execute(PENDING_SQL, (max_attempts,)).fetchall()]
 
 
 def stuck_count(conn, max_attempts: int) -> int:
     """失败次数已用完、被放弃的条目数（用来提示用户改配置或手工处理）。"""
     return int(conn.execute(STUCK_SQL, (max_attempts,)).fetchone()[0] or 0)
 
-
-def meta_pending_rows(conn, max_attempts: int) -> list[dict]:
-    """本轮要补标的条目：已有译文，但缺 is_news / ai_tags。"""
-    return [dict(r) for r in conn.execute(META_PENDING_SQL, (PLACEHOLDER, max_attempts)).fetchall()]
-
-
-def meta_stuck_count(conn, max_attempts: int) -> int:
-    return int(conn.execute(META_STUCK_SQL, (max_attempts,)).fetchone()[0] or 0)
 
 
 def _news_flag(analysis: dict):
@@ -217,14 +194,14 @@ def known_titles(conn, exclude_id, limit: int = 0) -> list:
 
 def save_ok(conn, item: dict, analysis: dict, attempts: int) -> None:
     """完整分析成功：写译文 + 四盏灯 + 标题/要点/重要度 + 标签 + 被引用正文的译文。"""
-    # 只在还停在 collected 时推进 stage；后续阶段只补字段，避免被重复判定
-    stage = item["stage"] or "collected"
-    new_stage = "translated" if stage == "collected" else stage
+    # 完整分析（包括修复缺灯）成功后必须回到 translated，让 judge 基于新灯重新判定。
+    new_stage = "translated"
     stamp = now()
     conn.execute(
         "UPDATE items SET zh=?, quoted_zh=?, ai_tags=?, is_news=?, not_repeat=?, not_comment=?, not_sensitive=?, "
         "repeat_of=?, ai_title=?, ai_summary=?, importance=?, ai_score=?, "
-        "stage=?, translate_error='', translate_attempts=?, translated_at=?, processed_at=?, "
+        "stage=?, decision=NULL, reason='', translate_error='', translate_attempts=?, meta_error='', meta_attempts=0, "
+        "translated_at=?, processed_at=?, "
         "rev=COALESCE(rev, 0) + 1 WHERE id=?",
         (
             analysis["zh"],
@@ -249,30 +226,6 @@ def save_ok(conn, item: dict, analysis: dict, attempts: int) -> None:
     )
 
 
-def save_meta_ok(conn, item: dict, meta: dict, attempts: int) -> None:
-    """补标成功：只动四盏灯和标签这几列；zh / stage / quoted_zh 一律不碰。"""
-    conn.execute(
-        "UPDATE items SET ai_tags=?, is_news=?, not_repeat=?, not_comment=?, not_sensitive=?, "
-        "repeat_of=?, ai_title=?, ai_summary=?, importance=?, ai_score=?, "
-        "meta_error='', meta_attempts=?, processed_at=?, rev=COALESCE(rev, 0) + 1 WHERE id=?",
-        (
-            _tags_json(meta),
-            _news_flag(meta),
-            _flag(meta.get("not_repeat")),
-            # 同 save_ok：有引用的条目第 3 盏灯强制绿灯
-            _not_comment_flag(item, meta.get("not_comment")),
-            _flag(meta.get("not_sensitive")),
-            meta.get("repeat_of") or "",
-            meta.get("title") or "",
-            meta.get("summary") or "",
-            meta.get("importance") or "",
-            meta.get("score"),
-            attempts,
-            now(),
-            item["id"],
-        ),
-    )
-
 
 def save_failed(conn, item: dict, error: Exception, attempts: int) -> None:
     """翻译的永久性失败：记错误并消耗一次重试机会。"""
@@ -289,19 +242,6 @@ def save_transient(conn, item: dict, error: Exception) -> None:
         (one_line(str(error)), item["id"]),
     )
 
-
-def save_meta_failed(conn, item: dict, error: Exception, attempts: int) -> None:
-    conn.execute(
-        "UPDATE items SET meta_error=?, meta_attempts=? WHERE id=?",
-        (one_line(str(error)), attempts, item["id"]),
-    )
-
-
-def save_meta_transient(conn, item: dict, error: Exception) -> None:
-    conn.execute(
-        "UPDATE items SET meta_error=? WHERE id=?",
-        (one_line(str(error)), item["id"]),
-    )
 
 
 def run_with_retry(call, tag: str):
@@ -328,15 +268,17 @@ def run_with_retry(call, tag: str):
 def analyze_with_retry(text: str, tag: str, account: str = "", known=None,
                        quoted_account: str = "", quoted_raw: str = ""):
     """完整分析（翻译 + 四盏灯 + 标题/要点/重要度 + 标签 + 被引用正文译文）。"""
-    return run_with_retry(
+    result, error, auth_failed = run_with_retry(
         lambda: analyze_item(text, account, known, quoted_account, quoted_raw), tag)
+    # 模型偶尔漏字段或输出坏 JSON 时，立即用明确校验反馈再做一次完整分析；
+    # 这不是补标调用，也不写入不完整结果。
+    if result is None and isinstance(error, ValueError):
+        log(f"[格式重试] {tag} 完整分析结果未通过校验：{one_line(str(error))}")
+        result, error, auth_failed = run_with_retry(
+            lambda: analyze_item(text, account, known, quoted_account, quoted_raw,
+                                 repair_hint=one_line(str(error))), tag)
+    return result, error, auth_failed
 
-
-def analyze_meta_with_retry(text: str, zh: str, tag: str, account: str = "", known=None,
-                            quoted_account: str = "", quoted_raw: str = ""):
-    """存量补标（只点灯 + 打标，不翻译）。"""
-    return run_with_retry(
-        lambda: analyze_meta(text, zh, account, known, quoted_account, quoted_raw), tag)
 
 
 def translate_pass(conn) -> tuple[int, int, int, bool]:
@@ -353,6 +295,7 @@ def translate_pass(conn) -> tuple[int, int, int, bool]:
 
     ok = failed = transient_left = 0
     for index, item in enumerate(todo, 1):
+        write_progress(True, "正在翻译并判灯", item, index, len(todo))
         attempts = int(item["attempts"]) + 1
         tag = f"{index}/{len(todo)}"
 
@@ -398,57 +341,6 @@ def translate_pass(conn) -> tuple[int, int, int, bool]:
     return ok, failed, transient_left, False
 
 
-def meta_pass(conn) -> tuple[int, int, int, bool]:
-    """② 存量补标一遍：返回 (成功, 永久失败, 限流待重试, 是否认证中止)。"""
-    todo = meta_pending_rows(conn, TRANSLATE_MAX_ATTEMPTS)
-    stuck = meta_stuck_count(conn, TRANSLATE_MAX_ATTEMPTS)
-    if not todo:
-        log("[检查] 没有需要补标的存量条目")
-        if stuck:
-            log(f"[提示] 另有 {stuck} 条补标连续失败已达上限 {TRANSLATE_MAX_ATTEMPTS} 次，已跳过")
-        return 0, 0, 0, False
-
-    log(f"[检查] 待补标 {len(todo)} 条（已有译文但缺灯/缺 AI 分/缺标签；不重新翻译）")
-
-    ok = failed = transient_left = 0
-    for index, item in enumerate(todo, 1):
-        attempts = int(item["attempts"]) + 1
-        tag = f"{index}/{len(todo)}"
-
-        meta, error, auth_failed = analyze_meta_with_retry(
-            str(item["raw"]), str(item["zh"]), tag, str(item.get("account") or ""),
-            known_titles(conn, item["id"], AI_REPEAT_CONTEXT),
-            str(item.get("quoted_account") or ""), str(item.get("quoted_raw") or ""))
-
-        if auth_failed:
-            log(f"[中止] 认证失败 HTTP {status_code_of(error)}：请检查 MODEL_API_KEY 是否正确")
-            return ok, failed, transient_left, True
-
-        if meta:
-            save_meta_ok(conn, item, meta, attempts)
-            conn.commit()
-            ok += 1
-            log(f"[补标OK {tag}] @{item['account']} 第{attempts}次 | {describe(meta)}")
-            # 有引用的条目同样会被强制放过第 3 盏灯，标注一下
-            if has_quote(item) and meta.get("not_comment") is not True:
-                log(f"[引用放行] {tag} @{item['account']} 有引用，第 3 盏灯（非评价）强制绿灯"
-                    f"（AI 原判 {meta.get('not_comment')}）")
-        elif is_transient(error):
-            save_meta_transient(conn, item, error)
-            conn.commit()
-            transient_left += 1
-            log(f"[限流] {tag} @{item['account']} 补标 {one_line(str(error))}")
-        else:
-            save_meta_failed(conn, item, error, attempts)
-            conn.commit()
-            failed += 1
-            log(f"[补标X  {tag}] @{item['account']} 第{attempts}次失败: {one_line(str(error))}")
-
-        if TRANSLATE_PAUSE_SECONDS > 0:
-            time.sleep(TRANSLATE_PAUSE_SECONDS)
-
-    return ok, failed, transient_left, False
-
 
 def describe(analysis: dict) -> str:
     """日志用的一句话：四盏灯 + 重要度 + 标题或标签。"""
@@ -473,10 +365,9 @@ def describe(analysis: dict) -> str:
     return " | ".join(parts)
 
 
-def main() -> int:
-    meta_only = "--meta-only" in sys.argv[1:]
+def _run_processing() -> int:
     log("=" * 55)
-    log("航小麦 · 翻译+新闻判定+标签 (模块2-A)" + ("（只补标）" if meta_only else ""))
+    log("航小麦 · 完整分析（翻译 + 四盏灯 + 标题/摘要/分数/标签）")
 
     summary = config_summary()
     log(f"[配置] 协议={summary['protocol']} 模型={summary['model']} 地址={summary['base']} "
@@ -487,42 +378,35 @@ def main() -> int:
         log("       配置入口：看板 → 处理服务 → 配置（MODEL_API_KEY / MODEL_API_BASE / MODEL_NAME）")
         return 1
 
-    if meta_only:
-        log("[跳过] --meta-only：本轮不做新条目的翻译")
-
     conn = open_db()
     try:
-        ok = failed = transient_left = 0
-        if not meta_only:
-            ok, failed, transient_left, aborted = translate_pass(conn)
-            if aborted:
-                log(f"[结果] 已中止：成功 {ok} 条，失败 {failed} 条（认证问题不消耗重试次数）")
-                log("       填好 key 后重新启动处理服务即可继续")
-                return 1
-            log(f"[结果] 完整分析：成功 {ok} 条，永久失败 {failed} 条，限流待重试 {transient_left} 条")
-
-        meta_ok, meta_failed, meta_transient, meta_aborted = meta_pass(conn)
-        if meta_aborted:
-            log(f"[结果] 补标已中止：成功 {meta_ok} 条，失败 {meta_failed} 条（认证问题不消耗重试次数）")
+        ok, failed, transient_left, aborted = translate_pass(conn)
+        if aborted:
+            log(f"[结果] 已中止：成功 {ok} 条，失败 {failed} 条（认证问题不消耗重试次数）")
+            log("       填好 key 后重新启动处理服务即可继续")
             return 1
-        log(f"[结果] 存量补标：成功 {meta_ok} 条，永久失败 {meta_failed} 条，限流待重试 {meta_transient} 条")
-
+        log(f"[结果] 完整分析：成功 {ok} 条，永久失败 {failed} 条，限流待重试 {transient_left} 条")
         if failed:
-            log("[提示] 翻译失败的条目已记 translate_error，下一轮会自动重试")
-        if transient_left or meta_transient:
+            log("[提示] 不完整回复或翻译失败已记 translate_error，下一轮会自动重试")
+        if transient_left:
             log(f"[提示] 限流/超时的条目没有消耗重试次数，下一轮会继续（本次已等待重试 "
                 f"{TRANSLATE_INLINE_RETRIES} 次）")
         left = stuck_count(conn, TRANSLATE_MAX_ATTEMPTS)
-        meta_left = meta_stuck_count(conn, TRANSLATE_MAX_ATTEMPTS)
         if left:
-            log(f"[提示] {left} 条翻译已达重试上限被跳过；可调大 TRANSLATE_MAX_ATTEMPTS 再试")
-        if meta_left:
-            log(f"[提示] {meta_left} 条补标已达重试上限被跳过；可调大 TRANSLATE_MAX_ATTEMPTS 再试")
+            log(f"[提示] {left} 条完整分析达到重试上限；看板队列会保留并显示错误")
     finally:
         conn.close()
 
-    log("=== 翻译+判定+标签结束 ===")
+    log("=== 完整分析结束 ===")
     return 0
+
+
+def main() -> int:
+    write_progress(True, "正在检查处理队列")
+    try:
+        return _run_processing()
+    finally:
+        write_progress(False, "本轮处理结束")
 
 
 if __name__ == "__main__":
