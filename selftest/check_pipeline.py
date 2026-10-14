@@ -288,7 +288,11 @@ tmp.unlink(missing_ok=True)
 print("[6] 翻译+四盏灯+标签：一次调用的输出解析与门控")
 def _valid_analysis(**changes):
     data = {"zh": "x", "title": "测试标题", "is_news": True, "not_repeat": True, "not_comment": True,
-            "not_sensitive": True, "score": 60, "tags": ["领域:任务"]}
+            "not_sensitive": True, "score": 60, "tags": ["领域:任务"],
+            "summary": "测试要点", "importance": "中"}
+    if changes.get("is_news") is False:
+        data["summary"] = ""
+        data["importance"] = ""
     data.update(changes)
     return json.dumps(data, ensure_ascii=False)
 
@@ -306,7 +310,8 @@ check("新闻三件套：标题", plain["title"] == "星舰第11次试飞成功"
 check("新闻三件套：要点", plain["summary"].startswith("SpaceX"), plain)
 check("新闻三件套：重要度", plain["importance"] == "高", plain)
 fenced = ('好的：\n```json\n{"zh":"译文","is_news":"是","not_repeat":"否","repeat_of":"#56",'
-          '"not_comment":"是","not_sensitive":false,"title":"猎鹰9故障","score":67,'
+          '"not_comment":"是","not_sensitive":false,"title":"猎鹰9故障",'
+          '"summary":"测试要点","importance":"高","score":67,'
           '"tags":"领域:故障, 对象:猎鹰9"}\n```')
 parsed = llm.parse_analysis(fenced)
 check("容忍代码块与前后废话", parsed["zh"] == "译文", parsed)
@@ -325,7 +330,7 @@ check("价值分判不出 -> 完整分析失败重试",
       raises(lambda: llm.parse_analysis(_valid_analysis(score="很好"))), "")
 check("标签字符串归一", parsed["tags"] == ["领域:故障", "对象:猎鹰9"], parsed)
 check("敏感政治中文键也认", llm.parse_analysis(
-      '{"zh":"x","is_news":true,"not_repeat":true,"not_comment":true,"不敏感":false,"title":"测试标题","score":60,"tags":["领域:任务"]}')["not_sensitive"] is False)
+      '{"zh":"x","is_news":true,"not_repeat":true,"not_comment":true,"不敏感":false,"title":"测试标题","summary":"测试要点","importance":"中","score":60,"tags":["领域:任务"]}')["not_sensitive"] is False)
 check("非新闻时三件套为空", llm.parse_analysis(_valid_analysis(is_news=False))["importance"] == "")
 check("重要度英文归一", llm.parse_analysis(_valid_analysis(importance="High"))["importance"] == "高")
 parsed = llm.parse_analysis(_valid_analysis(tags=["a", "a", "b"]))
@@ -347,8 +352,6 @@ check("提示词带来源账号", "@SpaceX" in llm.build_analysis_prompt("Starsh
 check("提示词无账号时不残留占位符", "{source}" not in llm.build_analysis_prompt("Starship"))
 check("提示词带已入库清单", "#56 星舰试飞" in llm.build_analysis_prompt("x", "a", ["#56 星舰试飞"]))
 check("清单为空时不留占位符", "{known}" not in llm.build_analysis_prompt("x", "a"))
-check("只补标提示词带译文", "译文：\n已有译文" in llm.build_meta_prompt("raw text", "已有译文"))
-check("只补标提示词无残留占位符", "{raw}" not in llm.build_meta_prompt("raw text", "已有译文"))
 check("标题提示词要求每条都有标题且优先复用原题",
       '每条内容都必须有非空的 "title"' in llm.build_analysis_prompt("Starship")
       and "优先复用" in llm.build_analysis_prompt("Starship")
@@ -365,26 +368,6 @@ check("缺原题也生成不超过20字的标题",
       bool(with_junk["title"]) and len(with_junk["title"]) <= 20, with_junk["title"])
 long_title = llm.parse_analysis(_valid_analysis(zh="正文。", title="这是一个明显超过二十个汉字的特别特别长标题"))
 check("标题限制为20字", len(long_title["title"]) <= 20, long_title["title"])
-
-print("[6b] 补标解析（存量条目：只点灯不翻译）")
-meta = llm.parse_meta('{"is_news":false,"not_repeat":true,"not_comment":true,"not_sensitive":true,'
-                      '"title":"","summary":"","importance":"","score":10,"tags":["领域:其他"]}',
-                      existing_zh="这是一条非新闻正文内容。")
-check("补标：非新闻也生成标题", meta["is_news"] is False and meta["tags"] == ["领域:其他"]
-      and bool(meta["title"]) and len(meta["title"]) <= 20, meta)
-check("补标缺任意一盏灯都不能冒充成功", raises(lambda: llm.parse_meta(
-      '{"is_news":true,"not_repeat":true,"tags":["领域:发射"]}')), "")
-meta = llm.parse_meta('{"is_news":false,"not_repeat":true,"not_comment":true,"not_sensitive":true,'
-                      '"title":"短标题","score":10,"tags":["领域:其他"],"clean_zh":"正文 ▶️ 直播观看：https://t.co/abc"}',
-                      existing_zh="正文 ▶️ 直播观看：https://t.co/abc")
-check("补标解析正文清理和标题", meta["clean_zh"] == "正文" and meta["title"] == "短标题", meta)
-meta = llm.parse_meta('{"is_news":true,"not_repeat":false,"repeat_of":"#12","not_comment":true,'
-                      '"not_sensitive":false,"title":"长征十二号首飞","summary":"成功入轨。",'
-                      '"importance":"高","score":80,"tags":["领域:发射"]}')
-check("补标：四盏灯 + 三件套", meta["is_news"] is True and meta["not_repeat"] is False
-      and meta["repeat_of"] == "#12" and meta["title"] == "长征十二号首飞"
-      and meta["importance"] == "高" and meta["not_sensitive"] is False, meta)
-check("补标：四盏灯和标签都空要抛", raises(lambda: llm.parse_meta('{"title":"x"}')), "")
 
 print("[6c] 四盏灯门控与打分")
 check("四绿", scoring.light_state({"is_news": 1, "not_repeat": 1, "not_comment": 1,
@@ -417,7 +400,7 @@ print("[7] 数据库迁移：旧库要能补出 AI 判定/标签/重要度 相�
 import collect.db as cdb  # noqa: E402
 
 NEW_COLUMNS = {"ai_tags", "is_news", "not_repeat", "not_comment", "not_sensitive", "repeat_of",
-               "ai_title", "ai_summary", "importance", "meta_attempts", "meta_error", "rev",
+               "ai_title", "ai_summary", "importance", "rev",
                # 引用（quote）：被引用那条也随条目存下来
                "quoted_account", "quoted_raw", "quoted_zh", "quoted_url"}
 conn = sqlite3.connect(":memory:")
@@ -425,10 +408,16 @@ conn.execute("CREATE TABLE items(id INTEGER PRIMARY KEY, raw TEXT, zh TEXT DEFAU
 cdb.ensure_schema(conn)
 cols = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
 check("旧表补出新列", NEW_COLUMNS <= cols, sorted(NEW_COLUMNS - cols))
+check("新库建立处理增量订阅表",
+      conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='processing_events'").fetchone()
+      == ("processing_events",))
 check("原有数据不丢", conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0)
+check("新数据库不再创建补标重试列",
+      not ({"meta_attempts", "meta_error"} & cols), sorted({"meta_attempts", "meta_error"} & cols))
 # 精简掉的列不能再被加回来（2026-09 那次瘦身）
 REMOVED_COLUMNS = {"tweet_id", "score", "labels", "final_decision",
-                   "published_ts", "published_date", "title", "url", "has_media"}
+                    "published_ts", "published_date", "title", "url", "has_media",
+                    "meta_attempts", "meta_error"}
 check("删掉的列不会被重新建出来", not (cols & REMOVED_COLUMNS), sorted(cols & REMOVED_COLUMNS))
 # 老库（还带着这些列）跑 ensure_schema：不能把已删的空列又建出来，也不该动已存在的旧列
 # （清掉旧列是 tools/drop_columns.py 的活，ensure_schema 只做"加列"）
@@ -446,51 +435,123 @@ check("唯一键还在（防重复入库）", "UNIQUE" in cdb.SCHEMA.upper() and
 legacy.close()
 conn.close()
 
-print("[8] 翻译队列判定：哪些要翻、哪些绝不重翻")
+event_case = SANDBOX / "processing_subscription"
+event_case.mkdir(parents=True, exist_ok=True)
+event_db = event_case / "hx.sqlite3"
+event_db.unlink(missing_ok=True)
+original_collect_db_file = cdb.DB_FILE
+cdb.DB_FILE = event_db
+try:
+    source_item = {"platform": "probe", "origin_id": "subscription-1", "account": "Probe",
+                   "raw": "第一版原文", "quoted_account": "", "quoted_raw": "", "images": []}
+    subscribed_id = cdb.upsert_raw(source_item)
+    event_conn = sqlite3.connect(event_db)
+    first_event = event_conn.execute(
+        "SELECT generation FROM processing_events WHERE item_id=?", (subscribed_id,)).fetchone()
+    event_conn.execute("UPDATE items SET stage='processed', zh='已处理的译文' WHERE id=?", (subscribed_id,))
+    event_conn.commit()
+    event_conn.close()
+    check("新采集行发布首个处理事件", first_event == (1,), first_event)
+
+    cdb.upsert_raw(source_item)
+    event_conn = sqlite3.connect(event_db)
+    unchanged_event = event_conn.execute(
+        "SELECT generation FROM processing_events WHERE item_id=?", (subscribed_id,)).fetchone()
+    unchanged_row = event_conn.execute(
+        "SELECT stage,zh FROM items WHERE id=?", (subscribed_id,)).fetchone()
+    event_conn.close()
+    check("重复采集相同正文不重复发布事件", unchanged_event == (1,), unchanged_event)
+    check("重复采集相同正文保留处理结果", unchanged_row == ("processed", "已处理的译文"), unchanged_row)
+
+    changed_item = dict(source_item, raw="更新后的原文")
+    cdb.upsert_raw(changed_item)
+    event_conn = sqlite3.connect(event_db)
+    changed_event = event_conn.execute(
+        "SELECT generation FROM processing_events WHERE item_id=?", (subscribed_id,)).fetchone()
+    changed_row = event_conn.execute(
+        "SELECT stage,zh,decision,translate_attempts FROM items WHERE id=?", (subscribed_id,)).fetchone()
+    event_conn.close()
+    check("正文变化发布新一代处理事件", changed_event == (2,), changed_event)
+    check("正文变化清空旧分析并回到 collected",
+          changed_row == ("collected", "", None, 0), changed_row)
+finally:
+    cdb.DB_FILE = original_collect_db_file
+
+print("[8] 处理池全库扫描：缺字段时统一完整分析")
 import translate_db as tdb  # noqa: E402
+from process.analysis_contract import missing_analysis_fields, processing_required  # noqa: E402
 
 case = SANDBOX / "translate_case"
 case.mkdir(parents=True, exist_ok=True)
 tdb_conn = sqlite3.connect(":memory:")
 tdb_conn.row_factory = sqlite3.Row      # pending_rows 要 dict(row)
 cdb.ensure_schema(tdb_conn)
-# (id, raw, zh, translate_attempts, meta_attempts, 四盏灯是否齐, 是否有 AI 分)
+# (id, raw, zh, translate_attempts, 四盏灯是否齐, 是否有 AI 分)
 ROWS = [
-    (1, "r1", "", 0, 0, False, False),            # 缺译文 → 完整重做
-    (2, "r2", "人工改过的译文", 0, 0, True, True),   # 有译文且四灯齐全 → 保留人工译文
-    (3, "r3", "", 3, 0, False, False),            # 失败已达上限 → 跳过
-    (4, "r4", "[未配置 key]", 1, 0, False, False),  # 旧占位符 → 完整重做
-    (5, "r5", "已有译文", 0, 0, True, True),        # 译文 + 四灯 + 分数都齐 → 两遍都不碰
-    (6, "r6", "已有译文", 0, 2, False, True),      # 有译文但缺灯 → 完整重翻并重新点灯
-    (7, "r7", "已有译文", 0, 0, True, False),       # 缺 AI 分也走完整分析
-    (8, "r8", "已有译文", 0, 0, True, True),        # 缺标题走完整分析
+    (1, "r1", "", 0, False, False),            # 缺译文 → 完整重做
+    (2, "r2", "人工改过的译文", 0, True, True),   # 完整 → 保留人工译文
+    (3, "r3", "", 3, False, False),            # 失败已达上限 → 跳过
+    (4, "r4", "[未配置 key]", 1, False, False),  # 旧占位符 → 完整重做
+    (5, "r5", "已有译文", 0, True, True),        # 完整 → 不重跑
+    (6, "r6", "已有译文", 0, False, True),       # 缺灯 → 完整重做
+    (7, "r7", "已有译文", 0, True, False),       # 缺 AI 分 → 完整重做
+    (8, "r8", "已有译文", 0, True, True),        # 缺标题 → 完整重做
 ]
-for item_id, raw, zh, attempts, meta_attempts, lit, scored in ROWS:
+for item_id, raw, zh, attempts, lit, scored in ROWS:
     tdb_conn.execute(
-        "INSERT INTO items(id, raw, zh, translate_attempts, meta_attempts, stage, collected_at) "
-        "VALUES(?,?,?,?,?,'translated','t')",
-        (item_id, raw, zh, attempts, meta_attempts),
+        "INSERT INTO items(id, raw, zh, translate_attempts, stage, collected_at) "
+        "VALUES(?,?,?,?,'translated','t')",
+        (item_id, raw, zh, attempts),
     )
     if lit:
         tdb_conn.execute(
             "UPDATE items SET is_news=1, not_repeat=1, not_comment=1, not_sensitive=1,"
-            " ai_tags='[\"领域:发射\"]', ai_title='已有标题' WHERE id=?", (item_id,))
+            " ai_tags='[\"领域:发射\"]', ai_title='已有标题',"
+            " ai_summary='要点', importance='高' WHERE id=?", (item_id,))
     else:
         tdb_conn.execute("UPDATE items SET is_news=1, ai_tags='[]' WHERE id=?", (item_id,))
     if scored:
         tdb_conn.execute("UPDATE items SET ai_score=80 WHERE id=?", (item_id,))
-# 这条应当代表元数据完整的存量行，保留已有标题，避免命中新增的缺标题补标条件。
+# 保留已有标题；随后清空第 8 条，验证缺标题也会完整重做。
 tdb_conn.execute("UPDATE items SET ai_title='已有标题' WHERE id IN (5, 8)")
 tdb_conn.execute("UPDATE items SET ai_title='' WHERE id=8")
 tdb_conn.execute("UPDATE items SET translate_error='HTTP 500 boom' WHERE id=2")
 tdb_conn.commit()
 
 picked = {r["id"] for r in tdb.pending_rows(tdb_conn, 3)}
-check("缺译文/灯/AI分/标题全部进入唯一完整分析队列", picked == {1, 4, 6, 7, 8}, sorted(picked))
-check("译文和完整元数据齐全时不因旧错误重跑", 2 not in picked, sorted(picked))
+check("缺译文/灯/AI分/标题进入同一个完整分析队列", picked == {1, 4, 6, 7, 8}, sorted(picked))
+check("增量处理只选订阅提供的 ID",
+      {r["id"] for r in tdb.pending_rows(tdb_conn, 3, [6, 8])} == {6, 8})
+check("空增量不会退化成全库扫描", tdb.pending_rows(tdb_conn, 3, []) == [])
+check("完整记录不因旧错误重跑", 2 not in picked, sorted(picked))
 check("达到重试上限的不再翻", 3 not in picked, sorted(picked))
-
-
+tdb_conn.execute("UPDATE items SET stage='collected' WHERE id=2")
+tdb_conn.commit()
+collected_complete = dict(tdb_conn.execute("SELECT * FROM items WHERE id=2").fetchone())
+check("完整分析的 collected 行仍须进入处理链", processing_required(collected_complete))
+check("扫描把完整 collected 行推进到判定阶段",
+      tdb.promote_complete_collected(tdb_conn) == 1
+      and tdb_conn.execute("SELECT stage FROM items WHERE id=2").fetchone()[0] == "translated")
+check("新闻要点缺失需要完整重做",
+      "要点" in missing_analysis_fields({"is_news": 1, "ai_summary": "", "importance": "高"}))
+check("非新闻允许空要点和重要度",
+      "要点" not in missing_analysis_fields({"is_news": 0, "ai_summary": "", "importance": ""}))
+check("引用译文缺失需要完整重做",
+      "引用译文" in missing_analysis_fields({"quoted_raw": "quoted", "quoted_zh": ""}))
+check("新闻完整分析缺要点时拒绝落库",
+      raises(lambda: llm.parse_analysis(_valid_analysis(summary=""))))
+_original_chat = llm.chat
+_original_is_configured = llm.is_configured
+llm.chat = lambda *args, **kwargs: json.dumps(_valid_analysis(quoted_zh=""), ensure_ascii=False)
+llm.is_configured = lambda: True
+try:
+    quote_analysis_rejected = raises(lambda: llm.analyze_item("raw", quoted_raw="quoted"))
+finally:
+    llm.chat = _original_chat
+    llm.is_configured = _original_is_configured
+check("引用译文缺失时拒绝完整分析结果", quote_analysis_rejected)
+check("没有补标或单独语义打标入口",
+      not any(hasattr(llm, name) for name in ("build_meta_prompt", "parse_meta", "analyze_meta", "semantic_labels")))
 
 class _Recorder:
     """假连接：记录数据库写入 SQL。"""
@@ -565,12 +626,8 @@ check("提示词带【被引用的推文】与被引用正文",
 check("标题提示词围绕有效正文并排除填充信息",
       "以清理后的 zh 为准" in q_prompt and "直播引导" in q_prompt
       and "账号会由发送格式单独附在标题后" in q_prompt)
-check("补标提示词同样带引用",
-      "被引用的正文内容" in llm.build_meta_prompt("x", "y", "a", None, "NASA", "被引用的正文内容"))
 parsed_q = llm.parse_analysis(_valid_analysis(zh="译文", quoted_zh="被引用的正文翻译"))
 check("解析 quoted_zh", parsed_q["quoted_zh"] == "被引用的正文翻译", parsed_q)
-check("没有 quoted_zh 时给空串", llm.parse_analysis(_valid_analysis(zh="译文"))["quoted_zh"] == "")
-
 print("[9] 分发队列（SQLite）：source 注册 / 待发判定 / 标记已发")
 import json  # noqa: E402
 import distribute.push_db as qdb  # noqa: E402
@@ -584,8 +641,8 @@ qconn = sqlite3.connect(qdb_file)
 cdb.ensure_schema(qconn)          # 真库的建表口径：pushed 列 + pushes 表都由它建
 for item_id, account, zh, decision in ((1, "SpaceX", "星舰", "发"), (2, "NASA", "月球", "发"),
                                        (3, "路人", "闲聊", "丢")):
-    qconn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score)"
-                  " VALUES(?,?,?,?,?,?)", (item_id, account, zh, "raw", decision, 80))
+    qconn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score, stage)"
+                  " VALUES(?,?,?,?,?,?, 'processed')", (item_id, account, zh, "raw", decision, 80))
 qconn.commit()
 qconn.close()
 
@@ -603,8 +660,27 @@ check("pushed 列由 collect/db.py 的 schema 建出来（不是分发端临时�
       "pushed" in {r[1] for r in sqlite3.connect(qdb_file).execute("PRAGMA table_info(items)")})
 check("pushes 审计表同样由 schema 建出来", _q(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='pushes'") == "pushes")
-check("未注册 source 时：待发 = 全部 decision='发'（'丢'的不算）",
+check("未注册 source 时：待发 = 已处理完成且 decision='发'（'丢'的不算）",
       [it["id"] for it in qdb.pending(db_file=qdb_file)] == [1, 2])
+
+gate_case = SANDBOX / "distribution_stage_gate"
+gate_case.mkdir(parents=True, exist_ok=True)
+gate_db = gate_case / "hx.sqlite3"
+gate_db.unlink(missing_ok=True)
+gate_conn = sqlite3.connect(gate_db)
+cdb.ensure_schema(gate_conn)
+gate_conn.execute("INSERT INTO items(id,raw,decision,stage) VALUES(1,'raw','发','judged')")
+gate_conn.execute("INSERT INTO items(id,raw,decision,stage) VALUES(2,'raw','发','processed')")
+gate_conn.commit()
+gate_conn.close()
+check("第三池隐藏尚未完成 AI 兜底的 judged 输出",
+      [it["id"] for it in qdb.pending(db_file=gate_db)] == [2])
+gate_conn = sqlite3.connect(gate_db)
+gate_conn.execute("UPDATE items SET stage='processed' WHERE id=1")
+gate_conn.commit()
+gate_conn.close()
+check("第三池扫描到新完成的 processed 输出",
+      [it["id"] for it in qdb.pending(db_file=gate_db)] == [1, 2])
 
 # 这一段只测注册/标记，先把"旧 JSON 迁移"的输入关掉，免得读到真实 data/queue/待推送.json
 _real_queue_files, _real_sent_files = qdb.LEGACY_QUEUE_FILES, qdb.LEGACY_SENT_FILES

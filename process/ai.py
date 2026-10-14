@@ -7,12 +7,11 @@
     anthropic  POST {base}/messages           走 httpx（不额外引入 anthropic 依赖）
 
 约定：
-  - 翻译（analyze_item）失败要抛（外层记录 translate_error 并累计重试次数）；
-  - 打标 / 兜底失败要吞掉并给安全值，不能中断整轮处理。
+  - 完整分析（analyze_item）失败要抛（外层记录 translate_error 并累计重试次数）；
+  - AI 兜底失败要吞掉并给安全值，不能中断整轮处理。
 
 一次调用完成这些事（analyze_item）：出译文、点四盏灯（是新闻 / 不重复 / 非评价 / 非敏感政治）、
 给新闻标题/要点/重要度、打标签。
-另有一条 analyze_meta()：给**已经有译文**的存量条目补四盏灯和标签，不重新翻译、不覆盖人工改过的译文。
 标签沿用 judge 认识的写法："领域:<发射|重大任务|任务|商业|科普|故障|历史|其他>"、"对象:<星舰/猎鹰9/...>"、
 "机构:<SpaceX/...>"；领域/对象的取值与 config_templates/推送规则.toml 的权重、白名单对齐。
 """
@@ -154,7 +153,7 @@ def chat(prompt: str, temperature: float = 0.0, model: str = "") -> str:
 
 # ---------------------------------------------------------------- 翻译 + 新闻 + 标签
 
-# 新闻判定 + 四盏灯 + 新闻三件套：完整分析 与 "只补标" 两条 prompt 共用，改这里就够
+# 新闻判定 + 四盏灯 + 新闻三件套：完整分析共用的判定规则。
 _NEWS_RULES = """- "is_news"【第 1 盏灯】：这条本身是不是一条航天新闻？
   航天新闻、官方公告、任务进展、行业动态、故障通报 → true；
   闲聊、个人日常、情绪转发、广告、抽奖、招聘、无实质信息 → false。
@@ -196,7 +195,7 @@ _NEWS_RULES = """- "is_news"【第 1 盏灯】：这条本身是不是一条航�
   0~9    = 垃圾/广告/纯噪声
   只按内容本身打分，**不要**考虑任何用户偏好；不是新闻也照打（给对应的低分）。"""
 
-# 标签规则：同样两条 prompt 共用
+# 标签规则：完整分析必须一次生成。
 _TAG_RULES = """- "tags"：3~6 个简体中文标签，必须含一个领域标签，尽量含一个对象标签：
   · 领域标签只能取：发射 / 重大任务 / 任务 / 商业 / 科普 / 故障 / 历史 / 其他，写法 "领域:发射"
     （重大任务 = 星舰首次/载人/深空探测这类里程碑；不是航天内容的写 "领域:其他"）
@@ -236,26 +235,6 @@ ANALYSIS_PROMPT = (
     '"importance":"高","score":92,"tags":["领域:发射","对象:星舰","机构:SpaceX"]}\n\n'
     "{known}{source}{quoted}原文：\n{raw}"
 )
-
-# 存量条目补标用：不重新翻译；标题缺失时补标题，正文有链接/状态噪声时才清理
-META_PROMPT = (
-    "你是航天内容处理助手。下面是一条**已经翻译过**的航天推文（原文和译文都给你）。\n"
-    "不要重新翻译。只输出一个 JSON 对象：不要 Markdown 代码块，不要任何解释或前后缀。\n"
-    "必须返回 \"clean_zh\"：现有译文准确通顺且干净时逐字复用；否则只做必要整理，成为忠实自然的新闻正文。\n"
-    "保留事实、数字、主体和有意义的时间/地点；清除 t.co/短链、直播观看引导、空 location 字段、\n"
-    "重复口号、无关背景及 \"Information as of\" 状态时间；正文不留裸 URL，不得补造信息。\n"
-    "标题必须非空且不超过 20 个汉字；原文有合适标题就沿用（英文译成中文），否则依据正文生成。\n\n"
-    + _BODY_RULES + "\n"
-    + _NEWS_RULES + "\n"
-    + _TAG_RULES + "\n"
-    "输出格式（严格 JSON）：\n"
-    '{"is_news":true,"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
-    '"title":"星舰第11次试飞成功","clean_zh":"星舰完成第11次试飞。",'
-    '"summary":"……","importance":"高","score":92,'
-    '"tags":["领域:发射","对象:星舰"]}\n\n'
-    "{known}{source}{quoted}原文：\n{raw}\n\n译文：\n{zh}"
-)
-
 
 def _fill(template: str, **fields) -> str:
     """把 {raw} / {zh} / {source} / {known} / {quoted} 这类占位符换成真实内容
@@ -306,14 +285,6 @@ def build_analysis_prompt(text: str, account: str = "", known_titles=None,
                  source=_source_head(account),
                  quoted=_quoted_block(quoted_account, quoted_raw),
                  raw=str(text or ""))
-
-
-def build_meta_prompt(text: str, zh: str = "", account: str = "", known_titles=None,
-                      quoted_account: str = "", quoted_raw: str = "") -> str:
-    return _fill(META_PROMPT, known=_known_block(known_titles),
-                 source=_source_head(account),
-                 quoted=_quoted_block(quoted_account, quoted_raw),
-                 raw=str(text or ""), zh=str(zh or ""))
 
 
 def _find_json_object(text: str) -> dict:
@@ -510,8 +481,8 @@ def _pick(data: dict, *keys):
     return None
 
 
-def _meta_fields(data: dict) -> dict:
-    """四盏灯 + 标题/要点/重要度/价值分 + 标签（+ 被引用正文的译文），完整分析和只补标共用。"""
+def _analysis_fields(data: dict) -> dict:
+    """Normalize the required full-analysis metadata returned with the translation."""
     repeat_of = _clean_text(_pick(data, "repeat_of", "重复于"))
     not_repeat = _to_flag(_pick(data, "not_repeat", "不重复"))
     # 按提示词契约，只有重复时才填写 repeat_of；两者冲突时以明确的重复编号为准。
@@ -547,7 +518,7 @@ def parse_analysis(output: str) -> dict:
     if not _clean_text(_pick(data, "title", "标题")):
         raise ValueError("完整分析缺少 AI 标题")
     result = {"zh": zh}
-    result.update(_meta_fields(data))
+    result.update(_analysis_fields(data))
     lights = ("is_news", "not_repeat", "not_comment", "not_sensitive")
     missing_lights = [key for key in lights if result[key] is None]
     if missing_lights:
@@ -556,25 +527,12 @@ def parse_analysis(output: str) -> dict:
         raise ValueError("完整分析缺少标签")
     if result["score"] is None:
         raise ValueError("完整分析缺少 AI 价值分")
+    if result["is_news"] and not result["summary"]:
+        raise ValueError("完整分析缺少新闻要点")
+    if result["is_news"] and result["importance"] not in {"高", "中", "低"}:
+        raise ValueError("完整分析缺少有效重要度")
     result["title"] = _ensure_title(result.get("title"), zh)
     return result
-
-
-def parse_meta(output: str, existing_zh: str = "") -> dict:
-    """解析"只判断不翻译"的回复；四盏灯和标签都拿不到就算失败（宁可重试）。"""
-    data = _find_json_object(output)
-    meta = _meta_fields(data)
-    meta["clean_zh"] = clean_zh_body(data.get("clean_zh") or data.get("zh") or "")
-    lights = ("is_news", "not_repeat", "not_comment", "not_sensitive")
-    missing_lights = [key for key in lights if meta[key] is None]
-    if missing_lights:
-        raise ValueError("补标缺少必需的灯: " + ", ".join(missing_lights))
-    if not meta["tags"]:
-        raise ValueError("补标缺少标签")
-    if meta["score"] is None:
-        raise ValueError("补标缺少 AI 价值分")
-    meta["title"] = _ensure_title(meta.get("title"), meta.get("clean_zh") or existing_zh)
-    return meta
 
 
 def analyze_item(text: str, account: str = "", known_titles=None,
@@ -600,55 +558,13 @@ def analyze_item(text: str, account: str = "", known_titles=None,
             '"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
             '"title":"...","summary":"...","importance":"中","score":50,"tags":["领域:其他"]}。'
         )
-    return parse_analysis(chat(prompt, temperature=0.3))
+    result = parse_analysis(chat(prompt, temperature=0.3))
+    if str(quoted_raw or "").strip() and not result["quoted_zh"]:
+        raise ValueError("完整分析缺少引用译文")
+    return result
 
 
-def analyze_meta(text: str, zh: str = "", account: str = "", known_titles=None,
-                 quoted_account: str = "", quoted_raw: str = "") -> dict:
-    """存量条目补标：只判断四盏灯 + 打标，不翻译（也不动已有译文）。失败向上抛。
-
-    `{quoted}` 一样会拼进去，让灯判得更准；但补标那一遍**不写 quoted_zh**
-    （见 translate_db.save_meta_ok）。
-    """
-    if not is_configured():
-        raise RuntimeError("模型 API 未配置完整，缺少：" + "、".join(missing_config()))
-    prompt = build_meta_prompt(text, zh, account, known_titles, quoted_account, quoted_raw)
-    return parse_meta(chat(prompt, temperature=0.0), existing_zh=zh)
-
-
-# ---------------------------------------------------------------- 打标 / 兜底（失败吞掉）
-
-def build_semantic_prompt(text: str) -> str:
-    """老条目兜底打标的提示词（放进函数是为了能被 tools/dump_prompts.py 原样导出）。"""
-    return (
-        "判断下面的航天新闻属于哪个领域、关键对象是什么。只输出一行中文，格式："
-        "领域=<发射/任务/商业/科普/故障/历史/其他>;关键对象=<星舰/猎鹰9/长征/X空 或具体任务>。\n"
-        f"新闻：{text}"
-    )
-
-
-def semantic_labels(text: str, log=None) -> list:
-    """语义标签（AI）：领域、关键对象。失败返回 []（不中断打分）。
-
-    翻译阶段已经把标签存进 items.ai_tags，这里是**老条目兜底**：
-    这些条目是本功能上线前翻译的，库里只有译文没有标签。
-    """
-    if not is_configured() or not text:
-        return []
-    try:
-        out = chat(build_semantic_prompt(text), temperature=0.0)
-        out = out.replace("领域=", "").replace("关键对象=", "")
-        parts = out.split(";")
-        labels = []
-        if len(parts) >= 1:
-            labels.append(f"领域:{parts[0].strip()}")
-        if len(parts) >= 2:
-            labels.append(f"对象:{parts[1].strip()}")
-        return labels
-    except Exception as e:
-        if log:
-            log(f"[警告] AI打标失败: {e}")
-        return []
+# ---------------------------------------------------------------- AI 兜底（失败吞掉）
 
 
 def build_fallback_prompt(news: dict, user_pref: dict, group_pref: dict) -> str:

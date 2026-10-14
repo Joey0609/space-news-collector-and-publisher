@@ -67,9 +67,9 @@ ch.DB_FILE = DB
 # 旧部署的 pushes 只有 sent_ts/detail，QQ 发成功后曾因缺 source 写库失败。
 legacy_db = SANDBOX / "legacy_pushes.sqlite3"
 legacy = sqlite3.connect(legacy_db)
-legacy.execute("CREATE TABLE items(id INTEGER PRIMARY KEY,decision TEXT,pushed TEXT,rev INTEGER)")
-legacy.execute("INSERT INTO items VALUES(1,'发','{}',1)")
-legacy.execute("INSERT INTO items VALUES(2,'发','{}',1)")
+legacy.execute("CREATE TABLE items(id INTEGER PRIMARY KEY,decision TEXT,pushed TEXT,rev INTEGER,stage TEXT)")
+legacy.execute("INSERT INTO items VALUES(1,'发','{}',1,'processed')")
+legacy.execute("INSERT INTO items VALUES(2,'发','{}',1,'processed')")
 legacy.execute("CREATE TABLE pushes(id INTEGER PRIMARY KEY,item_id INTEGER,channel TEXT,"
                "kind TEXT,sent_ts INTEGER,detail TEXT)")
 legacy.execute("INSERT INTO pushes(item_id,channel,kind,sent_ts,detail)"
@@ -92,8 +92,8 @@ conn = sqlite3.connect(DB)
 cdb.ensure_schema(conn)
 for item_id, account, zh in ((1, "SpaceX", "星舰第十次试飞成功"), (2, "NASA", "月球轨道站进展"),
                              (3, "路人", "今天天气不错")):
-    conn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score)"
-                 " VALUES(?,?,?,?,'发',80)", (item_id, account, zh, f"raw-{item_id}"))
+    conn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score, stage)"
+                 " VALUES(?,?,?,?,'发',80,'processed')", (item_id, account, zh, f"raw-{item_id}"))
 conn.execute("UPDATE items SET decision='丢' WHERE id=3")
 conn.commit()
 conn.close()
@@ -125,10 +125,10 @@ def scalar(sql, args=()):
         conn.close()
 
 
-def add_item(item_id: int, account: str, zh: str, score: int = 70):
+def add_item(item_id: int, account: str, zh: str, score: int = 70, stage: str = "processed"):
     conn = sqlite3.connect(DB)
-    conn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score)"
-                 " VALUES(?,?,?,?,'发',?)", (item_id, account, zh, f"raw-{item_id}", score))
+    conn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score, stage)"
+                 " VALUES(?,?,?,?,'发',?,?)", (item_id, account, zh, f"raw-{item_id}", score, stage))
     conn.commit()
     conn.close()
 
@@ -226,6 +226,33 @@ wait_for(lambda: pushed_of(6).get("pull_probe:group_555") is True)
 check("拉取模式的回执照样写库", pushed_of(6).get("pull_probe:group_555") is True, pushed_of(6))
 check("老渠道发过的条目不会灌给新通道（回填规则）",
       pushed_of(1).get("pull_probe:group_555") is True, pushed_of(1))
+
+print("[1c] 已连接渠道轮询处理输出池")
+add_item(13, "Pipeline", "处理输出订阅测试", stage="judged")
+output_source = "process_output_probe:group_333"
+push_db.register_sources([output_source], db_file=DB)
+push_db.mark_pushed([6], output_source, db_file=DB)  # 隔离上一段留下的历史样例
+output_client = make_client("process_output_probe", [{"kind": "group_333", "label": "输出测试"}])
+output_seen = []
+output_thread = threading.Thread(
+    target=output_client.run_forever,
+    args=(lambda item, source: (output_seen.append((source, item["id"])), {"ok": True})[1],),
+    kwargs={"max_rounds": 1}, daemon=True)
+output_thread.start()
+time.sleep(0.3)
+check("stage=judged 时输出池不提前暴露", output_seen == [], output_seen)
+conn = sqlite3.connect(DB)
+conn.execute("UPDATE items SET stage='processed' WHERE id=13")
+conn.commit()
+conn.close()
+wait_for(lambda: bool(output_seen))
+output_thread.join(timeout=5)
+check("处理完成后已连接渠道下一轮扫描收到输出",
+      output_seen == [("process_output_probe:group_333", 13)], output_seen)
+conn = sqlite3.connect(DB)
+conn.execute("UPDATE items SET decision='丢' WHERE id=13")
+conn.commit()
+conn.close()
 
 print("[2] 失败 / 延后就保持未发（下次还会推）")
 add_item(4, "Blue", "新一条")

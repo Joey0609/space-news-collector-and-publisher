@@ -4,7 +4,7 @@
 完整协议见 [`../dashboard/PROTOCOL.md`](../dashboard/PROTOCOL.md)。
 
 ```
-items.decision = '发'                  ← 处理阶段判定要发
+items.stage = 'processed' AND items.decision = '发'  ← 完整处理结束且最终判定要发
 items.pushed   = {"<source>": true}    ← 我这个 source 发过没有（服务端写，渠道不碰库）
 pushes                                 ← 每次成功发送的审计（source/item_id/sent_at）
 ```

@@ -28,20 +28,7 @@ parts.append("```text")
 parts.append(ai.build_analysis_prompt(RAW, "SPACEdotcom", KNOWN, Q_ACCOUNT, Q_RAW))
 parts.append("```\n")
 
-parts.append("## 2. 存量补标（只点四盏灯 + 打标，不翻译）\n")
-parts.append("调用点：`translate_db.py` 补标那一遍（已有译文、没点灯的老条目）。")
-parts.append("`{quoted}` 一样会拼进去帮判灯，但这一遍**不写** `quoted_zh`。\n")
-parts.append("```text")
-parts.append(ai.build_meta_prompt(RAW, ZH, "SPACEdotcom", KNOWN, Q_ACCOUNT, Q_RAW))
-parts.append("```\n")
-
-parts.append("## 3. 老条目语义打标兜底（只在条目完全没有 ai_tags 时才发）\n")
-parts.append("调用点：`judge.py`。正常流程不会走到这里。\n")
-parts.append("```text")
-parts.append(ai.build_semantic_prompt(ZH))
-parts.append("```\n")
-
-parts.append("## 4. 边缘分数 AI 兜底（只有分数落在低阈值和高阈值之间才发）\n")
+parts.append("## 2. 边缘分数 AI 兜底（只有分数落在低阈值和高阈值之间才发）\n")
 parts.append("调用点：`ai_fallback.py`。走四盏灯判定时不会用到。\n")
 parts.append("```text")
 parts.append(ai.build_fallback_prompt(
@@ -52,7 +39,7 @@ parts.append(ai.build_fallback_prompt(
 ))
 parts.append("```\n")
 
-parts.append("## 5. 模型必须回的 JSON 形状\n")
+parts.append("## 3. 模型必须回的 JSON 形状\n")
 parts.append("```json")
 parts.append('{"zh":"译文",'
              '"quoted_zh":"被引用正文的译文（没有引用就给空串）",'

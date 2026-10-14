@@ -4,7 +4,7 @@
 这里是"文件格式的唯一出处"——想加字段先看这里。所有写入都容错（失败只记日志，
 不抛异常），保证定时任务不会因为一次写盘失败整体中断。
 
-注意：**待推送队列已经不在 JSON 里了**——队列就是 items 表里 decision='发' 的行，
+注意：**待推送队列已经不在 JSON 里了**——最终池是 items 表里 stage='processed' 且 decision='发' 的行，
 "这条发给过谁"记在 items.pushed（见 distribute/push_db.py）。这里不再有
 load_pending / append_pending。
 """

@@ -37,13 +37,14 @@ python tools\migrate_layout.py --dry-run
 ```text
 collect/news_fetch.py
   -> data/raw/new_news_*.json + data/hx.sqlite3 items(stage=collected)
-  -> process/translate_db.py     缺译文→完整分析；有译文但缺灯/缺分/缺标签→只补判断（不动 zh）。
+  -> process/translate_db.py     看板启动时全库扫描一次；之后消费采集写入的 processing_events 增量订阅；
+                                 缺少任一必需字段→同一次完整分析重做。
                                  产出：zh 译文 / 四盏灯 is_news·not_repeat·not_comment·not_sensitive /
                                  ai_score AI 价值分(0~100) / ai_title / ai_summary / importance / ai_tags，
                                  stage=translated
   -> process/judge.py            四绿→发、任一红→丢（老条目走规则分+阈值），rules_score/decision/reason，stage=judged
   -> process/ai_fallback.py      decision（最终判定直接写回），stage=processed
-  -> items.decision='发' + items.pushed（**不再写队列文件**）
+  -> stage='processed' AND decision='发' + items.pushed（**不再写队列文件**）
   -> 看板渠道 WebSocket（127.0.0.1:8788）→ maibot 插件 / 艾莉森 / NapCat
 ```
 
@@ -55,7 +56,7 @@ collect/news_fetch.py
 
 **待推送不是文件，是数据库状态**——只有两件事要判断：
 
-- `items.decision = '发'`：处理阶段判定要发。
+- `items.stage = 'processed' AND items.decision = '发'`：完整处理链结束且最终判定要发。
 - `items.pushed`：JSON 对象，记"这条发给过哪些 source"，例
   `{"maibot:private": true, "maibot:group_123": false, "alison:group_456": true}`。
   自己的 source 不是 `true` 就是"该我发"；**发成功后**才置 `true`（`pushes` 表另记发送时间）。
@@ -82,8 +83,9 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 | **推送**（默认） | 服务端逐条推 `item`，渠道回 `result` / `defer` | 艾莉森（`distribute/alison/channel.py`）、NapCat（`distribute/napcat/channel.py`） |
 | **拉取**（`{"pull": true}`） | 渠道按自己节奏 `want`，服务端回 `items` | 麦麦插件（自己的活跃时段/间隔/每日汇总） |
 
-- 渠道启动时会 `hello` 注册 → 服务端 `register_sources()`（新 source 回填）→ **只推"确实没发过的"**；
+- 渠道启动时会 `hello` 注册 → 服务端 `register_sources()`（新 source 回填）→ 扫描最终处理池，只推**确实没发过的**；
   `result ok=true` 才 `mark_pushed()` 写库并回 `ack`；`ok=false` / `defer` / 超时 → 条目保持未发 + 退避重试。
+- 输出池以 SQLite 为唯一接口：推送模式在线时每轮轮询 `stage='processed' AND decision='发'`；拉取模式在渠道发 `want` 时读取同一池。新处理结果在下一次轮询/`want` 时可见；不依赖易丢的进程内事件。
 - 插件侧 `hx_ws.py` 是 SDK 的自包含镜像（插件拷进麦麦部署，不能 import 仓库代码），
   自检 `check_channels.py` 的第 [5] 段让它和仓库实现跑同一个真 WS 服务端，保证两边一致。
 - 内置渠道写在 `dashboard/channels.py` 的 `BUILTIN_CHANNELS`（maibot=plugin 外部渠道；
@@ -129,7 +131,7 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 
 ### process
 
-- `translate_db.py`：主流程入口，两遍，**缺什么就重做什么**：① 缺译文（zh 空/旧占位符/翻译失败）→ 完整分析（译文 + **四盏灯** `is_news/not_repeat/not_comment/not_sensitive` + **AI 价值分 `ai_score`(0~100)** + 标题/要点/重要度 + 标签）；② 有译文但**缺灯/缺 AI 分/缺标签** → 只补判断（**不重新翻译、不覆盖人工译文**，`--meta-only` 可只跑这遍）。判"不重复"时会带上"最近已入库标题清单"（`AI_REPEAT_CONTEXT` 条，0=关）。失败按"临时/永久/认证"分别记账重试，两遍各有自己的上限（`translate_attempts` / `meta_attempts`）。
+- `translate_db.py`：处理服务启动时全库扫描一次；之后只处理 `collect.db` 发布到 `processing_events` 的新增/变更条目 ID。缺译文、四灯、有效 AI 分、标签、标题、正文清理、新闻要点/重要度或引用译文任一项时，都用同一次完整分析重做；失败统一记在 `translate_attempts` / `translate_error`，通过订阅事件延迟重试。判"不重复"时会带上"最近已入库标题清单"（`AI_REPEAT_CONTEXT` 条，0=关）。
 - `translate.py`：保留的 JSON 版翻译入口，逻辑同上，读写 `data/raw` 与 `data/work`。
 - `judge.py`：**四绿直接发、任一红直接丢**（`[gate] "AI分下限" > 0` 时四绿但 AI 分太低也丢；老条目没点灯时回到规则分+阈值+AI兜底）。`items.score` 优先用 AI 分、没分才用 `rules_score`。标签取自 `ai_tags` + `重要:高/中/低`；白名单/排除/阈值照旧。`[gate] 三灯放行 = false` 可退回纯打分。
 - `ai.py`：全部提示词在这里；`tools/dump_prompts.py` 会把真实提示词导出成 `提示词.md`（改完提示词记得重跑它）。
@@ -138,7 +140,7 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 
 ### distribute
 
-- `push_db.py`：**分发队列的唯一口径**（读 `decision='发'`、按 source 查/标 `items.pushed`、
+- `push_db.py`：**分发队列的唯一口径**（读 `stage='processed' AND decision='发'`、按 source 查/标 `items.pushed`、
   登记新 source、旧 JSON 一次性迁移、看板用的待分发统计）。只有看板侧读库。
 - `ws_codec.py` / `ws_channel.py`：渠道 WebSocket 的编解码与服务端/客户端 SDK（纯标准库）。
 - `maibot/hangxiaomai_news/`：MaiBot 插件（**拉取模式**渠道），部署时把该目录拷进 MaiBot 的 `plugins/`；
@@ -162,6 +164,7 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 后端：`dashboard/server.py`（HTTP + 统一信封 API + 进程管理）、`dashboard/channels.py`（渠道注册表与推送调度）、
 `dashboard/ws.py`（渠道 WebSocket 服务端，127.0.0.1:8788）、`dashboard/service_runner.py`（采集/处理循环）。
 协议与 API 契约见 **`dashboard/PROTOCOL.md`**（改前端/渠道前先看它）。
+看板服务器启动时自动启动 `process` 服务做全库完整性扫描；`collect` 保持手动启动，避免启动看板即触发真实抓取。
 前端：`dashboard/webui/`，原生 HTML/CSS/JS，**顶部「处理 / 分发」双 tab**、运行摘要、内容列表占满整宽。
 
 启动器（根目录，用户日常入口）：`run_dashboard.bat` → `run_dashboard.ps1`，服务器 Python 在**当前 BAT 终端**
@@ -173,7 +176,7 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 
 实时与分页（看板要和采集/翻译同步）：
 
-- `items.rev`：每次改这一行就 +1（`collect/db.py` 采集更新、`translate_db.py` 翻译/补标、
+- `items.rev`：每次改这一行就 +1（`collect/db.py` 采集更新、`translate_db.py` 完整分析、
   `judge.py`、`ai_fallback.py`、看板改译文都 +1）。翻译是**就地更新**已有行、id 不变，
   只看 id 会漏掉"译文/四盏灯刚写好"，所以增量必须靠 rev。
 - SSE（`/api/stream`）每秒推 `latest_id` / `latest_rev`；前端发现游标变大就拉
@@ -189,6 +192,7 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 
 - `items`：来源、原文、译文、评分、判定和处理阶段，外加 **`pushed`**（分发状态：
   `{"通道:目标": true}`，见「分发队列」）与 `rev`（改动计数，看板实时同步靠它）。
+- `processing_events`：采集发布新增/变化的原文条目；处理服务启动全库恢复扫描后，只消费这里的增量 ID。按 item 合并，`generation` 防止新版本被旧回执确认，失败事件带退避时间。
 - `pushes`：`item_id` / `channel` / `kind` / `source` / `sent_at`，`UNIQUE(source, item_id)`
   —— 发送审计 + 幂等，防止同一条重复标记。
 - `alison_groups`：按群 OpenID 存已知群信息、是否仍为成员、逐群推送开关（新群默认关闭）；

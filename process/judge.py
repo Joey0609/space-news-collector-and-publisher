@@ -20,6 +20,7 @@
       AI 语义打标在 process/ai.py。
 """
 import asyncio
+import argparse
 import json
 import sys
 from datetime import datetime
@@ -33,7 +34,6 @@ for _path in (_REPO, _COLLECT, _PROCESS):
         sys.path.insert(0, str(_path))
 
 from config import DEFAULT_TARGET_PRIVATE
-from ai import semantic_labels as _ai_semantic_labels
 from rules import (
     ai_tags as _ai_tags,
     decide,
@@ -47,6 +47,8 @@ from rules import (
     score_with_rules as _score_with_rules,
 )
 from process.db import rows as db_rows, open_db
+from collect.db import ensure_processing_event
+from process.analysis_contract import missing_analysis_fields
 from process.jsonio import deep_merge as _deep_merge, latest_file, load_toml
 from process.logging_util import make_log, setup_console_encoding
 from process.paths import CONFIG_DIR, LOG_DIR, RAW_DIR, WORK_DIR
@@ -65,14 +67,30 @@ def find_latest_news() -> Path:
 
 
 async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("news_file", nargs="?", help="旧 JSON 入口；默认读取 SQLite")
+    parser.add_argument("--item-ids", help="仅处理订阅收到的逗号分隔条目 ID")
+    args = parser.parse_args()
+    item_ids = None
+    if args.item_ids is not None:
+        item_ids = [int(value) for value in args.item_ids.split(",") if value.strip().isdigit()]
+        if not item_ids:
+            log("[错误] --item-ids 没有有效条目 ID")
+            return
+        if args.news_file:
+            parser.error("--item-ids 不能和 JSON 文件路径同时使用")
     log("=" * 55)
     log("航小麦 · 打标打分器 (模块2)")
 
-    news_file = sys.argv[1] if len(sys.argv) > 1 else "数据库"
+    news_file = args.news_file or "数据库"
     if news_file == "数据库":
-        news_list = db_rows("translated")
+        translated = db_rows("translated", item_ids)
         # Do not repeatedly rejudge rows already finalized in the database.
-        news_list = [row for row in news_list if not row.get("decision")]
+        news_list = [row for row in translated
+                     if not row.get("decision") and not missing_analysis_fields(row)]
+        skipped = len(translated) - len(news_list) - sum(1 for row in translated if row.get("decision"))
+        if skipped:
+            log(f"[跳过] {skipped} 条 translated 记录缺少完整分析字段；等待处理池完整重做")
     else:
         news_list = json.loads(Path(news_file).read_text(encoding="utf-8"))
     log(f"[输入] {news_file}，共 {len(news_list)} 条")
@@ -94,11 +112,8 @@ async def main():
     judged = []
     for n in news_list:
         mech = _mechanical_labels(n)
-        # 翻译阶段已经存好 AI 标签（ai_tags），直接用，省一次模型调用；
-        # 老条目（本功能上线前翻译的）库里没有标签，才现场补一次语义打标。
+        # 标签由完整分析阶段一次写齐；判定阶段直接消费 ai_tags。
         tags = _ai_tags(n)
-        if not tags:
-            tags = _ai_semantic_labels(n.get("zh", "") or n.get("raw", ""), log)
         importance = _importance_label(n)          # "重要:高"（没判出来是空串）
         labels = mech + tags + ([importance] if importance else [])
         rules_score, reason = _score_with_rules(labels, n, rules, pref)
@@ -152,9 +167,15 @@ async def main():
     if news_file == "数据库":
         conn=open_db()
         for item in judged:
+            ensure_processing_event(conn, item.get('id'))
             # 只写值得长期保存的：分数落在 ai_score/rules_score，标签落在 ai_tags+importance，
             # 所以这里不再写 score / labels（它们都能由上面几列算出来）。
-            conn.execute("UPDATE items SET rules_score=?,decision=?,reason=?,stage='judged',processed_at=?,rev=COALESCE(rev,0)+1 WHERE id=?",(item.get('rules_score'),item.get('decision'),item.get('reason'),datetime.now().isoformat(timespec='seconds'),item.get('id')))
+            conn.execute("UPDATE items SET rules_score=?,decision=?,reason=?,stage='judged',processed_at=?,rev=COALESCE(rev,0)+1 "
+                         "WHERE id=? AND stage='translated' AND raw IS ? AND quoted_raw IS ? "
+                         "AND quoted_account IS ? AND account IS ?",
+                         (item.get('rules_score'),item.get('decision'),item.get('reason'),
+                          datetime.now().isoformat(timespec='seconds'),item.get('id'),item.get('raw'),
+                          item.get('quoted_raw'),item.get('quoted_account'),item.get('account')))
         conn.commit(); conn.close()
     else:
         WORK_DIR.mkdir(parents=True, exist_ok=True)

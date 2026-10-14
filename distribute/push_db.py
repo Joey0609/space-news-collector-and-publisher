@@ -3,7 +3,7 @@
 ================================================================================
 一条内容"该不该发给某个通道"只判断一件事：`items.pushed` 里那个 source 是不是 true。
 
-    items.decision = '发'                      ← 处理阶段判定要发（原 待推送.json 的入队条件）
+    items.stage = 'processed' AND decision='发' ← 完整处理结束且最终判定要发
     items.pushed   = {"maibot:private": true,
                       "maibot:group_123": false,
                       "alison:group_456": true}
@@ -37,7 +37,7 @@ LEGACY_QUEUE_FILES = (QUEUE_DIR / "待推送.json", REPO / "config" / "待推送
 LEGACY_SENT_FILES = (QUEUE_DIR / "已发记录.json",)
 SEED_FLAG = "push_seeded"
 
-PASSED_SQL = "TRIM(COALESCE(decision, '')) = '发'"
+PASSED_SQL = "TRIM(COALESCE(decision, '')) = '发' AND COALESCE(stage, '') = 'processed'"
 
 
 # ────────────────────────── source 命名 ──────────────────────────
@@ -69,15 +69,11 @@ def connect(db_file=None) -> sqlite3.Connection:
 
 def _ensure(conn: sqlite3.Connection) -> None:
     """缺列补列、缺表建表。表和列的"正式出处"仍是 collect/db.py 的 SCHEMA，
-    这里只是让分发端在采集/处理还没跑过时也能自己站起来。"""
+    这里每次连接都调用它，让分发端也能把旧库升级到最终输出池的字段契约。"""
     conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
-    has_items = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='items'"
-                             ).fetchone() is not None
-    if not has_items:
-        # 全新库（看板先启动、采集还没跑）：直接按正式 schema 建表。
-        # 否则下面那句 ALTER 会打在空气上（no such table: items）。
-        from collect.db import ensure_schema
-        ensure_schema(conn)
+    # 全新库（看板先启动、采集还没跑）和缺少 stage 的旧库都按正式 schema 补齐。
+    from collect.db import ensure_schema
+    ensure_schema(conn)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(items)").fetchall()}
     if "pushed" not in cols:
         conn.execute("ALTER TABLE items ADD COLUMN pushed TEXT DEFAULT '{}'")
@@ -258,7 +254,7 @@ def registry(db_file=None) -> list:
 # ────────────────────────── 读待推送 ──────────────────────────
 
 def pending(source: str = "", db_file=None) -> list:
-    """`decision='发'` 的条目，按入库顺序（id 升序，和旧队列顺序一致）。
+    """`stage='processed' AND decision='发'` 的条目，按入库顺序（id 升序）。
 
     给了 source 就只回"这个 source 还没发过"的（pushed 里不是 true 的都算没发）。
     """

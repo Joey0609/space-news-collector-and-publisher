@@ -294,36 +294,83 @@ def test_process_backlog():
         conn = sqlite3.connect(tmp / "hx.sqlite3")
         conn.execute("""CREATE TABLE items(
             id INTEGER PRIMARY KEY, origin_id TEXT, account TEXT, raw TEXT, zh TEXT,
-            stage TEXT, ai_title TEXT, ai_score INTEGER, ai_tags TEXT,
+            stage TEXT, ai_title TEXT, ai_score INTEGER, ai_tags TEXT, ai_summary TEXT,
+            importance TEXT, quoted_raw TEXT, quoted_zh TEXT,
             is_news INTEGER, not_repeat INTEGER, not_comment INTEGER, not_sensitive INTEGER,
-            translate_attempts INTEGER, translate_error TEXT, meta_attempts INTEGER,
-            meta_error TEXT, ts INTEGER)""")
+            translate_attempts INTEGER, translate_error TEXT, ts INTEGER)""")
         fields = ("id, origin_id, account, raw, zh, stage, ai_title, ai_score, ai_tags, "
-                  "is_news, not_repeat, not_comment, not_sensitive, translate_attempts, "
-                  "translate_error, meta_attempts, meta_error, ts")
+                  "ai_summary, importance, quoted_raw, quoted_zh, is_news, not_repeat, "
+                  "not_comment, not_sensitive, translate_attempts, translate_error, ts")
         conn.execute(f"INSERT INTO items({fields}) VALUES(1,'2109939184257695951','Redwire','raw','译文',"
-                     "'processed','已有标题',65,'[\"领域:发射\"]',1,NULL,1,1,1,'',2,'',100)")
+                     "'processed','已有标题',65,'[\"领域:发射\"]','要点','高','','',1,NULL,1,1,1,'',100)")
         conn.execute(f"INSERT INTO items({fields}) VALUES(2,'done','NASA','raw','译文',"
-                     "'processed','标题',80,'[\"领域:任务\"]',1,1,1,1,1,'',0,'',90)")
+                     "'processed','标题',80,'[\"领域:任务\"]','要点','高','','',1,1,1,1,1,'',90)")
         conn.execute(f"INSERT INTO items({fields}) VALUES(3,'stuck','NASA','raw','译文',"
-                     "'processed','标题',NULL,'[\"领域:任务\"]',1,1,1,1,3,'格式无效',0,'',80)")
+                     "'processed','标题',NULL,'[\"领域:任务\"]','要点','高','','',1,1,1,1,3,'格式无效',80)")
         conn.execute(f"INSERT INTO items({fields}) VALUES(4,'untranslated','X','raw','',"
-                     "'collected','',NULL,'',NULL,NULL,NULL,NULL,0,'',0,'',70)")
+                     "'collected','',NULL,'','','','','',NULL,NULL,NULL,NULL,0,'',70)")
+        conn.execute(f"INSERT INTO items({fields}) VALUES(5,'no-summary','NASA','raw','译文',"
+                     "'processed','标题',80,'[\"领域:任务\"]','','高','','',1,1,1,1,0,'',60)")
+        conn.execute(f"INSERT INTO items({fields}) VALUES(6,'no-quote-zh','NASA','raw','译文',"
+                     "'processed','标题',80,'[\"领域:任务\"]','要点','高','引用正文','',1,1,1,1,1,'',50)")
         conn.commit()
         conn.close()
 
         result = server.process_backlog()
-        assert result["remaining_count"] == 3, result
-        assert result["ready_count"] == 2 and result["stuck_count"] == 1, result
+        assert result["remaining_count"] == 5, result
+        assert result["ready_count"] == 4 and result["stuck_count"] == 1, result
         by_id = {item["id"]: item for item in result["items"]}
         assert "重复" in by_id[1]["missing"] and by_id[1]["phase"] == "待完整分析" and by_id[1]["attempts"] == 1, by_id[1]
         assert by_id[3]["stuck"] and "AI分" in by_id[3]["missing"], by_id[3]
         assert by_id[4]["phase"] == "待完整分析", by_id[4]
+        assert "要点" in by_id[5]["missing"] and "引用译文" in by_id[6]["missing"], result
         summary = server.process_backlog(include_items=False)
-        assert summary == {"items": [], "remaining_count": 3, "ready_count": 2, "stuck_count": 1}, summary
+        assert summary == {"items": [], "remaining_count": 5, "ready_count": 4, "stuck_count": 1}, summary
     finally:
         server.DATA = original_data
         server._max_process_attempts = original_attempts
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_processing_subscription_queue():
+    """The processor acks completed events and backs off incomplete increments."""
+    from dashboard import service_runner as runner
+
+    tmp = Path(__file__).resolve().parent / ".sandbox" / "processing_event_case"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    original_db = runner.DB_FILE
+    runner.DB_FILE = tmp / "hx.sqlite3"
+    try:
+        conn = runner._event_connection()
+        conn.execute("""INSERT INTO items(id,raw,zh,is_news,not_repeat,not_comment,not_sensitive,
+            ai_score,ai_tags,ai_title,ai_summary,importance,stage)
+            VALUES(1,'raw','译文',1,1,1,1,70,'[\"领域:任务\"]','标题','要点','高','processed')""")
+        conn.execute("INSERT INTO items(id,raw,stage) VALUES(2,'new raw','collected')")
+        from collect.db import ensure_processing_event
+        ensure_processing_event(conn, 1)
+        ensure_processing_event(conn, 2)
+        conn.commit()
+        conn.close()
+
+        events = runner.read_processing_events(due_only=True)
+        assert [event["item_id"] for event in events] == [1, 2], events
+        runner.settle_processing_events(events, 0)
+        all_events = runner.read_processing_events(due_only=False)
+        assert len(all_events) == 1 and all_events[0]["item_id"] == 2, all_events
+        assert all_events[0]["attempts"] == 1, all_events
+        assert runner.read_processing_events(due_only=True) == [], "退避中的增量不应立即重跑"
+
+        conn = runner._event_connection()
+        from collect.db import enqueue_processing_event
+        enqueue_processing_event(conn, 2)
+        conn.commit()
+        conn.close()
+        fresh = runner.read_processing_events(due_only=True)
+        assert len(fresh) == 1 and fresh[0]["item_id"] == 2 and fresh[0]["generation"] == 2, fresh
+        assert "process" not in runner.INTERVALS, runner.INTERVALS
+    finally:
+        runner.DB_FILE = original_db
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -366,5 +413,6 @@ if __name__ == "__main__":
     test_stop_kills_whole_tree()
     test_pagination_and_changes()
     test_process_backlog()
+    test_processing_subscription_queue()
     test_launchers()
     print("dashboard 服务标签 + API 契约 + 停止服务杀整棵树 + 分页/增量推送 + 启动器: OK")

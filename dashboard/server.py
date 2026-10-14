@@ -26,8 +26,9 @@ WEB = ROOT / "dashboard" / "webui"
 TOKEN_FILE = STATE / "dashboard_token.txt"
 AUDIT = STATE / "audit.jsonl"
 COOKIE_FILE = STATE / "x_cookies.txt"
-# 待分发数直接问分发队列（SQLite：decision='发' 且还有 source 没发完），不再读 待推送.json
+# 待分发数直接问最终输出池（SQLite：stage=processed、decision='发' 且 source 未发），不再读 待推送.json
 from distribute.push_db import pending_count as queue_pending_count  # noqa: E402
+from process.analysis_contract import missing_analysis_fields, processing_required  # noqa: E402
 from dashboard import alison_config  # noqa: E402
 from dashboard import channels as channel_hub  # noqa: E402
 from dashboard.ws import ChannelWSServer  # noqa: E402
@@ -38,7 +39,7 @@ PROCESSES: dict[str, subprocess.Popen] = {}
 SERVICE_NAMES = {"collect": "采集", "process": "处理"}
 CONFIG_FIELDS = {
     "collect": ["PROXY_URL", "COOKIES_PATH", "SCAN_BATCH", "PAUSE_SECONDS", "COLLECT_INTERVAL_SECONDS"],
-    "process": ["MODEL_PROTOCOL", "MODEL_API_BASE", "MODEL_NAME", "MODEL_API_KEY", "MODEL_TIMEOUT", "MODEL_MAX_TOKENS", "AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES", "TRANSLATE_RATE_LIMIT_WAIT", "TRANSLATE_PAUSE_SECONDS", "PROCESS_INTERVAL_SECONDS"],
+    "process": ["MODEL_PROTOCOL", "MODEL_API_BASE", "MODEL_NAME", "MODEL_API_KEY", "MODEL_TIMEOUT", "MODEL_MAX_TOKENS", "AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES", "TRANSLATE_RATE_LIMIT_WAIT", "TRANSLATE_PAUSE_SECONDS"],
 }
 CHANNEL_KEY_PREFIX = "channel:"
 WS_PORT = int(os.getenv("HX_WS_PORT", "") or 8788)
@@ -291,20 +292,6 @@ def services() -> dict:
     return result
 
 
-_ANALYSIS_NEEDS_WORK = """(
-       COALESCE(is_news, -1) = -1 OR COALESCE(not_repeat, -1) = -1
-    OR COALESCE(not_comment, -1) = -1 OR COALESCE(not_sensitive, -1) = -1
-    OR COALESCE(ai_score, -1) = -1 OR TRIM(COALESCE(ai_tags, '')) = ''
-    OR TRIM(COALESCE(ai_title, '')) = ''
-    OR instr(lower(COALESCE(zh, '')), 'http://') > 0
-    OR instr(lower(COALESCE(zh, '')), 'https://') > 0
-    OR instr(lower(COALESCE(zh, '')), 'www.') > 0
-    OR instr(lower(COALESCE(zh, '')), 'information as of') > 0
-    OR instr(lower(COALESCE(zh, '')), 'location:') > 0
-    OR instr(COALESCE(zh, ''), '直播观看') > 0
-)"""
-
-
 def _max_process_attempts() -> int:
     try:
         return max(1, int(env_values().get("TRANSLATE_MAX_ATTEMPTS", "3")))
@@ -321,65 +308,50 @@ def _read_process_progress() -> dict:
 
 
 def process_backlog(include_items: bool = True) -> dict:
-    """唯一完整分析队列：翻译、四灯和所有 AI 元数据必须一次齐全。"""
+    """全库扫描处理池；缺失项与处理器使用同一完整性契约。"""
     db = DATA / "hx.sqlite3"
     if not db.exists():
         return {"items": [], "remaining_count": 0, "ready_count": 0, "stuck_count": 0}
     max_attempts = _max_process_attempts()
-    needs_work = f"((zh IS NULL OR TRIM(zh) = '' OR zh = ?) OR {_ANALYSIS_NEEDS_WORK})"
     try:
         conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         columns = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
-        required = {"id", "raw", "zh", "translate_attempts", "is_news", "not_repeat",
-                    "not_comment", "not_sensitive", "ai_score", "ai_tags", "ai_title"}
+        required = {"id", "raw", "zh", "stage", "translate_attempts", "translate_error",
+                    "is_news", "not_repeat", "not_comment", "not_sensitive", "ai_score",
+                    "ai_tags", "ai_title", "ai_summary", "importance", "quoted_raw", "quoted_zh"}
         if not required <= columns:
             conn.close()
             return {"items": [], "remaining_count": 0, "ready_count": 0, "stuck_count": 0}
-        if not include_items:
-            rows = conn.execute(
-                "SELECT COALESCE(translate_attempts,0) AS attempts FROM items "
-                "WHERE raw IS NOT NULL AND TRIM(raw) <> '' AND " + needs_work,
-                ("[未配置 key]",),
-            ).fetchall()
-            conn.close()
-            ready_count = sum(1 for item in rows if int(item["attempts"]) < max_attempts)
-            return {"items": [], "remaining_count": len(rows), "ready_count": ready_count,
-                    "stuck_count": len(rows) - ready_count}
         rows = conn.execute(
             "SELECT id, origin_id, account, raw, zh, stage, ai_title, ai_score, ai_tags, "
-            "is_news, not_repeat, not_comment, not_sensitive, translate_attempts, translate_error, ts "
-            "FROM items WHERE raw IS NOT NULL AND TRIM(raw) <> '' AND " + needs_work +
+            "ai_summary, importance, quoted_raw, quoted_zh, is_news, not_repeat, not_comment, "
+            "not_sensitive, translate_attempts, translate_error, ts "
+            "FROM items WHERE raw IS NOT NULL AND TRIM(raw) <> '' "
             " ORDER BY COALESCE(ts, 0) DESC, id DESC",
-            ("[未配置 key]",),
         ).fetchall()
         conn.close()
     except Exception as exc:
         print(f"[看板] 处理队列读取失败: {exc}", flush=True)
         return {"items": [], "remaining_count": 0, "ready_count": 0, "stuck_count": 0}
 
+    candidates = [dict(row) for row in rows if processing_required(dict(row))]
+    if not include_items:
+        ready_count = sum(1 for item in candidates
+                          if not missing_analysis_fields(item)
+                          or int(item.get("translate_attempts") or 0) < max_attempts)
+        stuck_count = len(candidates) - ready_count
+        return {"items": [], "remaining_count": len(candidates), "ready_count": ready_count,
+                "stuck_count": stuck_count}
+
     items = []
     ready_count = stuck_count = 0
-    for row in rows:
-        item = dict(row)
-        missing = []
-        if not item.get("zh") or item["zh"] == "[未配置 key]":
-            missing.append("译文")
-        for field, label in (("is_news", "新闻"), ("not_repeat", "重复"),
-                             ("not_comment", "评价"), ("not_sensitive", "敏感")):
-            if item.get(field) is None:
-                missing.append(label)
-        if item.get("ai_score") is None:
-            missing.append("AI分")
-        if not str(item.get("ai_tags") or "").strip():
-            missing.append("标签")
-        if not str(item.get("ai_title") or "").strip():
-            missing.append("标题")
-        body = str(item.get("zh") or "")
-        if any(marker in body.lower() for marker in ("http://", "https://", "www.", "information as of", "location:")) or "直播观看" in body:
-            missing.append("正文清理")
+    for item in candidates:
+        missing = missing_analysis_fields(item)
+        if not missing:
+            missing.append("流程阶段")
         attempts = int(item.get("translate_attempts") or 0)
-        stuck = attempts >= max_attempts
+        stuck = bool(missing_analysis_fields(item)) and attempts >= max_attempts
         if stuck:
             stuck_count += 1
         else:
@@ -389,7 +361,7 @@ def process_backlog(include_items: bool = True) -> dict:
             "account": item.get("account") or "未知账号",
             "title": str(item.get("ai_title") or "").strip(),
             "raw": str(item.get("raw") or "")[:240],
-            "stage": item.get("stage") or "", "phase": "待完整分析",
+            "stage": item.get("stage") or "", "phase": "待完整分析" if missing[0] != "流程阶段" else "待进入判定",
             "missing": missing, "attempts": attempts, "max_attempts": max_attempts,
             "stuck": stuck, "error": str(item.get("translate_error") or "")[:240],
         })
@@ -954,6 +926,8 @@ def main() -> None:
     dashboard_token = token()
     print("HX dashboard token:", dashboard_token, flush=True)
     channel_hub.ensure_builtin_channels()
+    startup_pending = queue_pending_count(sources=channel_hub.active_sources())
+    print(f"[分发] 启动扫描最终输出池：当前启用 source 待发 {startup_pending} 条", flush=True)
 
     # 渠道 WebSocket：和 HTTP 同一个进程、独立端口；起不来不拖垮看板（只记日志）
     WS_SERVER = ChannelWSServer("127.0.0.1", WS_PORT, dashboard_token,
@@ -978,6 +952,8 @@ def main() -> None:
                 opener.start()
             print(f"[看板] 服务器终端已就绪：http://127.0.0.1:{args.port}/"
                   "（关闭此终端即停止服务）", flush=True)
+            process_pid = start_service("process")
+            print(f"[处理] 看板启动时自动启动处理订阅服务，PID={process_pid}", flush=True)
             httpd.serve_forever()
     finally:
         if WS_SERVER is not None:

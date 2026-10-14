@@ -11,9 +11,21 @@ def open_db():
  ensure_schema(c)
  return c
 
-def rows(stage=None):
- c=open_db(); q='SELECT * FROM items'; args=()
- if stage: q+=' WHERE stage=?'; args=(stage,)
+def rows(stage=None, item_ids=None):
+ c=open_db(); clauses=[]; args=[]
+ if stage:
+  clauses.append('stage=?'); args.append(stage)
+ if item_ids is not None:
+  ids=[]
+  for value in item_ids:
+   if isinstance(value,bool): continue
+   try: parsed=int(value)
+   except (TypeError,ValueError): continue
+   if parsed not in ids: ids.append(parsed)
+  if not ids:
+   c.close(); return []
+  clauses.append('id IN ('+','.join('?' for _ in ids)+')'); args.extend(ids)
+ q='SELECT * FROM items'+(' WHERE '+' AND '.join(clauses) if clauses else '')
  result=[dict(r) for r in c.execute(q,args).fetchall()]; c.close(); return result
 
 def update(item_id, **fields):

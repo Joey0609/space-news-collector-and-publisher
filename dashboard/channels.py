@@ -6,8 +6,8 @@
 
 1. **注册**：收到 `hello` → `push_db.register_sources()`（新 source 自动回填历史行）
    → 渠道写进 `channels` 表（id / label / adapter / targets / last_seen）。
-2. **推送**：每个连接一个推送线程，按 target（= source）轮流取
-   `pending(source=...)`，**一条一条**发 `item`，等回执。
+2. **订阅处理输出**：每个连接一个推送线程，按 target（= source）扫描
+   `stage='processed' AND decision='发'` 的数据库池；空闲时每 5 秒再看一次。按 source 轮流取未发项，**一条一条**发 `item`，等回执。
 3. **回执**：`ok` → `push_db.mark_pushed()` 并回 `ack`；`defer`/失败/超时 → 该 source
    退避一段时间，条目保持未发（下次接着推）。
 4. **控制**：看板 `enabled` 开关 → 给渠道发 `pause` / `resume`；`process` 类渠道由
@@ -459,6 +459,8 @@ class ChannelSession:
 
     # ── 推送循环 ──
     def _push_loop(self) -> None:
+        # Durable subscription: query the completed-output pool on every cycle.
+        # Rows written by the processing service appear on the next scan, including after reconnect.
         if self.pull:                             # 拉取模式：不主动推，只等渠道 want
             print(f"[渠道:{self.id}] 拉取模式（服务端不主动推，等渠道 want）", flush=True)
             while not self.stop_event.wait(IDLE_SLEEP):

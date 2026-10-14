@@ -1,6 +1,6 @@
 # 航小麦 · 渠道协议 & 看板 API（v1，冻结）
 
-分发队列的真值在数据库（`items.decision='发'` + `items.pushed`，见 `distribute/push_db.py`）。
+分发队列的真值在数据库（`items.stage='processed' AND items.decision='发'` + `items.pushed`，见 `distribute/push_db.py`）。
 **渠道不再自己查库**：渠道连上服务端 → 注册 → 服务端把"这个渠道还没发过的"条目**一条一条**推给它
 → 渠道回执 → 成功的才写库。一份实现两处镜像（仓库 `distribute/`、麦麦插件目录），自检对照。
 
@@ -13,6 +13,19 @@
                              │  注册表 / 逐条推送 / 退避     │
                    maibot ───┘（插件主动连）        alison ──┘（看板可启停的常驻进程）
 ```
+
+---
+
+## 0. 处理输入订阅
+
+看板启动处理服务时先对 SQLite 做一次全库完整性扫描，用来恢复服务停止期间积累的记录。启动扫描结束后，处理服务不再周期性重扫 `items`：
+
+1. `collect.db.upsert_raw()` 在同一事务中写入新增/变化的原文，并发布到 `processing_events`。
+2. 处理服务等待到期事件，按事件里的 `item_id` 调用完整处理链；不会把全库查询作为后续增量入口。
+3. 成功完成的事件确认后删除；暂时失败的事件写入下次可处理时间并退避重试；达到完整分析重试上限的条目从事件队列移除，仍留在看板处理列表供查看。
+4. 事件按 item 合并并带 generation，处理过程中同一条内容再次变化时，新一代事件不会被旧处理结果确认掉。
+
+`processing_events` 是持久订阅队列，因此处理服务重启时可以通过启动全库扫描恢复；在运行期间，新采集内容走事件增量。
 
 ---
 
@@ -64,7 +77,7 @@
 ### 1.3 推送规则（服务端）
 
 1. 收到 `hello` → `register_sources(通道的每个 target 一个 source)`；新 source 自动回填历史行。
-2. 从 `pending(source=...)` 取该渠道**未发送**的（`decision='发'` 且 `pushed[source] != true`），id 升序，
+2. 从 `pending(source=...)` 取该渠道**未发送**的（`stage='processed' AND decision='发'` 且 `pushed[source] != true`），id 升序，
    逐条推。**注册过还是新注册都一样**：都只推"确实没发过的"。
 3. 回执处理：
    - `result ok=true` → `mark_pushed([item_id], source)` → 回 `ack` → 推下一条。
@@ -72,7 +85,9 @@
    - `defer seconds` → 保持未发，该 source 退避 `seconds`（钳制 30 ~ 3600）。
    - 120 秒没回执 → 按 `defer 60` 处理并记日志（不回滚任何东西）。
 4. 渠道 `enabled=0`、断线、收到 `pause` → 该渠道不推；重新启用/重连后继续从第 2 步来。
-5. 队列里没有未发的条目 → 每 5 秒再看一次（空闲不计日志）。
+5. 推送模式的在线会话每轮扫描同一个 SQLite 输出池；没条目时每 5 秒再看一次（空闲不计日志）。处理服务把行写成 `stage='processed'` 后，它会在下一轮扫描中出现。拉取模式不主动扫描，渠道按自己的节奏发 `want`，服务端从同一查询取数。
+
+这就是第二阶段到第三阶段的输出订阅：**数据库轮询订阅**，不是进程内事件通知。`hello` 注册 source 后推送会话马上开始扫描；重启或断线后重连会重新扫描整个最终输出池，所以不会因错过一次通知漏条目。
 
 ### 1.4 渠道注册表（数据库表 `channels`）
 
@@ -103,7 +118,7 @@ HTTP 状态码仍有意义（200 / 400 / 401 / 404 / 500）。写操作要 `X-HX
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/state` | 首屏一次拿全：`services`、`process_progress`、`channels`、`stats`、`env_ready`、`configurable`、`ts` |
-| GET | `/api/process/backlog` | 唯一完整分析队列中的所有条目（翻译、四灯、标题、分数、标签或正文任一缺失），含缺失字段、尝试次数和重试上限状态；处理卡片剩余条数弹窗使用 |
+| GET | `/api/process/backlog` | 全库完整性扫描得到的处理池条目：缺译文、四灯、有效 AI 分、标签、标题、正文清理、新闻要点/重要度或引用译文任一项，都要整条完整重做；含缺失项、尝试次数和重试上限状态 |
 | GET | `/api/items?offset=&limit=` | 分页条目 |
 | GET | `/api/snapshot?offset=&limit=&since_id=&since_rev=` | 首屏/加载更多/增量补丁（`incremental` 标记） |
 | GET | `/api/pushes?limit=` | 最近分发尝试（`push_attempts`，含成功/失败与群名）；`pushes` 只保留成功审计 |
@@ -129,6 +144,7 @@ QQ 官方文档只提供[按 OpenID 获取指定群信息](https://bot.q.qq.com/
 历史未记录的群可在配置弹窗手动补录 OpenID 后刷新。开启艾莉森渠道时，BotPy 长连接负责群事件与正式分发；**不会自动发任何 QQ 测试消息**。
 
 `services` 里只剩 **`collect` / `process`**（分发不再是"一个服务"，而是若干渠道，见 `/api/channels`）。
+看板进程启动后自动启动 `process` 服务扫描全库；采集服务仍需手动启动。
 
 `channels[]` 元素：
 

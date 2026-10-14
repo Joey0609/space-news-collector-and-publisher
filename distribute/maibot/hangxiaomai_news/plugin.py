@@ -5,7 +5,7 @@
       以麦麦口吻主动推送（来源行 + 译文 + 配图 + 麦麦的一句评论），发完回报结果。
 
 工作链路：
-    外部主流程(模块5) 判定"该发" → 结果留在 SQLite（items.decision='发'）
+    外部主流程(模块5)完成处理并判定"该发" → 结果留在 SQLite（stage='processed', decision='发'）
     → **看板**（dashboard/channels.py）持有分发队列，在 127.0.0.1:8788 上开渠道 WebSocket
     → 本插件作为**渠道**连过去（拉取模式）：按自己的节奏 `want` 一批 → 用麦麦口吻发
       → 逐条回报结果 → 看板收到 ok 才写库（items.pushed 置 true、pushes 记审计）

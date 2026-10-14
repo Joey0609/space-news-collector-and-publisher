@@ -26,10 +26,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-# 建议删除的列（配合代码改动；分两组，可按需只删一组）
+# 建议删除的列（配合代码改动；分组便于只删一组）
 LEGACY_EMPTY = ["published_ts", "published_date", "title", "url", "has_media"]   # 旧版遗留、全空
 DUPLICATED = ["final_decision", "tweet_id", "labels", "score"]                   # 纯重复/纯派生
-SUGGESTED = LEGACY_EMPTY + DUPLICATED
+LEGACY_PROCESS = ["meta_attempts", "meta_error"]                                  # 已移除的独立元数据判定计数
+SUGGESTED = LEGACY_EMPTY + DUPLICATED + LEGACY_PROCESS
 
 # 唯一键所在列，绝不能删
 PROTECTED = {"id", "dedup_key"}

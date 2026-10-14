@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """排版与候选挑选：把"分发队列里的一条"变成"群里要发的那段话"。
 ============================================================
-队列来自 SQLite（decision='发' 且本通道 source 不是 true，见 push_queue.py），
+队列来自 SQLite（stage='processed'、decision='发' 且本通道 source 不是 true，见 push_queue.py），
 所以这里**不再判断"发没发过"**——传进来的就是还没发过的。
 
 格式：

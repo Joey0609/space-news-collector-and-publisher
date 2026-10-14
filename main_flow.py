@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """航小麦 · 主流程 (模块5 · main_flow.py)
 =======================================
-作用：把整条推送线串起来，建议每 10 分钟跑一遍：
+作用：把整条推送线串起来：
       模块1(增量抓取) → 模块2(打标打分) → 模块3(AI兜底)
       → 判定"发"的结果原地留在 SQLite（items.decision）
       → 分发端（麦麦插件 / 艾莉森）直接读库取自己还没发过的条目推送。
+
+看板处理服务启动时完整扫描一次；后续由 collect.db 的 processing_events 订阅增量条目。
 
 运行：
     <venv>/Scripts/python.exe main_flow.py
@@ -13,7 +15,7 @@
 说明：
   - 子模块用麦麦 venv 的 pythonw.exe 跑（无控制台黑窗）；找不到就退回当前解释器。
   - 每个子模块独立进程：一个崩了不影响其它模块，日志见 logs/*.log。
-  - **不再写 待推送.json**：队列就是 items 表里 decision='发' 的行，
+  - **不再写 待推送.json**：队列就是 items 表里 stage='processed' 且 decision='发' 的行，
     每条内容发给了哪些通道记在 items.pushed 里（见 distribute/push_db.py）。
 """
 import os
@@ -118,23 +120,34 @@ def cleanup_old_outputs(keep: int = 3) -> None:
                 pass
 
 
-def run_processing() -> bool:
-    """只处理最近一次采集结果，不重复触发采集。"""
+def run_processing(item_ids=None) -> bool:
+    """处理完整输入池，或只处理订阅提供的增量 ID。"""
+    scoped_args = []
+    incremental_count = 0
+    if item_ids is not None:
+        ids = sorted({int(value) for value in item_ids})
+        if not ids:
+            return True
+        incremental_count = len(ids)
+        scoped_args = ["--item-ids", ",".join(str(value) for value in ids)]
     write_processing_stage("正在准备翻译和点灯")
     success = True
     try:
-        run_module("translate_db.py")
+        success = run_module("translate_db.py", *scoped_args) and success
         write_processing_stage("正在按四盏灯和规则判定")
-        success = run_module("judge.py") and success
+        success = run_module("judge.py", *scoped_args) and success
         write_processing_stage("正在进行 AI 兜底判定")
-        success = run_module("ai_fallback.py") and success
+        success = run_module("ai_fallback.py", *scoped_args) and success
         if not success:
             log("[错误] 处理阶段存在失败")
             return False
-        should = should_send_count()
-        log(f"[结果] 库里判定'发'共 {should} 条；{queue_describe()}")
-        log(f"[结果] 待分发 {queue_pending_count()} 条（分发端直接读库，不写队列文件）")
-        cleanup_old_outputs()
+        if item_ids is None:
+            should = should_send_count()
+            log(f"[结果] 库里判定'发'共 {should} 条；{queue_describe()}")
+            log(f"[结果] 待分发 {queue_pending_count()} 条（分发端直接读库，不写队列文件）")
+            cleanup_old_outputs()
+        else:
+            log(f"[结果] 本轮处理订阅增量 {incremental_count} 条")
     finally:
         write_processing_stage("本轮处理结束", running=False)
 
@@ -142,8 +155,20 @@ def run_processing() -> bool:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--collect-only", action="store_true", help="只执行采集")
-    parser.add_argument("--process-only", action="store_true", help="只处理最近采集结果")
+    parser.add_argument("--process-only", action="store_true", help="只执行处理阶段")
+    parser.add_argument("--item-ids", help="处理订阅收到的逗号分隔条目 ID")
     args = parser.parse_args()
+    item_ids = None
+    if args.item_ids is not None:
+        item_ids = []
+        for value in args.item_ids.split(","):
+            if value.strip().isdigit():
+                item_ids.append(int(value.strip()))
+        item_ids = sorted(set(item_ids))
+        if not item_ids:
+            parser.error("--item-ids 没有有效条目 ID")
+        if not args.process_only or args.collect_only:
+            parser.error("--item-ids 只能和 --process-only 一起使用")
     log("=" * 55)
     log("航小麦 · 主流程")
     if not args.process_only:
@@ -152,7 +177,7 @@ def main() -> None:
             log("[错误] 采集阶段失败，停止本轮处理")
             raise SystemExit(1)
     if not args.collect_only:
-        process_ok = run_processing()
+        process_ok = run_processing(item_ids)
         if process_ok is False:
             raise SystemExit(1)
     log("=== 主流程结束 ===")

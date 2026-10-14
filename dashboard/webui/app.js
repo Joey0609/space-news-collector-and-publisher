@@ -31,7 +31,6 @@ const hints = {
   TRANSLATE_MAX_ATTEMPTS: "永久失败的单条最多重试次数（每轮自动补翻未翻译/失败的条目）。",
   TRANSLATE_INLINE_RETRIES: "遇到限流/超时时，同一轮内当场重试几次。",
   TRANSLATE_RATE_LIMIT_WAIT: "限流/超时后等待多少秒再重试。",
-  PROCESS_INTERVAL_SECONDS: "处理间隔秒数。",
 };
 
 const protocolLabels = {
@@ -298,7 +297,7 @@ const FILTERS = {
   green: (item) => lightStateOf(item) === "green",
   red: (item) => lightStateOf(item) === "red",
   unknown: (item) => lightStateOf(item) === "unknown",
-  send: (item) => item.decision === "发",
+  send: (item) => item.stage === "processed" && item.decision === "发",
 };
 let itemFilter = "all";
 

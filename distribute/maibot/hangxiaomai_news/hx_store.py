@@ -8,7 +8,7 @@
     提醒待发.txt    存在则启动时发一条并删除
 
 ⚠️ **待推送队列不在这里**：队列已经是 SQLite 里的状态
-（`items.decision='发'` + `items.pushed`，按 source 记"发给了哪个通道"），
+（`items.stage='processed' AND items.decision='发'` + `items.pushed`，按 source 记"发给了哪个通道"），
 读写都在 hx_push_db.py。本模块不再有 load_pending / save_pending / record_sent。
 """
 import json

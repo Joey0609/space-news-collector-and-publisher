@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import time
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -29,14 +30,14 @@ from config import (  # noqa: E402
     missing_config,
 )
 from process.db import open_db  # noqa: E402
+from process.analysis_contract import missing_analysis_fields  # noqa: E402
+from collect.db import ensure_processing_event  # noqa: E402
 from process.logging_util import make_log, one_line, setup_console_encoding  # noqa: E402
 from process.paths import LOG_DIR  # noqa: E402
 from rules import has_quote  # noqa: E402  （"有引用"判定，见 _not_comment_flag）
 
 log = make_log(LOG_DIR / "translate.log")
 
-# 旧版本在没配 key 时会把这句话写进 zh，当成"没翻译"看待，本轮补翻。
-PLACEHOLDER = "[未配置 key]"
 PROGRESS_FILE = _ROOT / "data" / "state" / "process_progress.json"
 
 
@@ -66,38 +67,6 @@ def write_progress(running: bool, phase: str, item: dict | None = None,
         os.replace(temporary, PROGRESS_FILE)
     except OSError as exc:
         log(f"[进度] 看板进度写入失败: {one_line(str(exc))}")
-
-# 一条完整分析队列：任意必需字段缺失，都用同一调用重新产出译文、四灯和元数据。
-_ANALYSIS_NEEDED = ("(zh IS NULL OR TRIM(zh) = '' OR zh = '{placeholder}' "
-                    "OR COALESCE(is_news, -1) = -1 OR COALESCE(not_repeat, -1) = -1 "
-                    "OR COALESCE(not_comment, -1) = -1 OR COALESCE(not_sensitive, -1) = -1 "
-                    "OR COALESCE(ai_score, -1) = -1 OR TRIM(COALESCE(ai_tags, '')) = '' "
-                    "OR TRIM(COALESCE(ai_title, '')) = '' "
-                    "OR instr(lower(COALESCE(zh, '')), 'http://') > 0 "
-                    "OR instr(lower(COALESCE(zh, '')), 'https://') > 0 "
-                    "OR instr(lower(COALESCE(zh, '')), 'www.') > 0 "
-                    "OR instr(lower(COALESCE(zh, '')), 'information as of') > 0 "
-                    "OR instr(lower(COALESCE(zh, '')), 'location:') > 0 "
-                    "OR instr(COALESCE(zh, ''), '直播观看') > 0)").format(placeholder=PLACEHOLDER)
-
-PENDING_SQL = f"""
-    SELECT id, account, raw, stage, quoted_account, quoted_raw,
-           COALESCE(translate_attempts, 0) AS attempts
-      FROM items
-     WHERE raw IS NOT NULL AND TRIM(raw) <> ''
-       AND COALESCE(translate_attempts, 0) < ?
-       AND {_ANALYSIS_NEEDED}
-     ORDER BY COALESCE(ts, 0) DESC, id DESC
-"""
-
-STUCK_SQL = f"""
-    SELECT COUNT(*)
-      FROM items
-     WHERE raw IS NOT NULL AND TRIM(raw) <> ''
-       AND COALESCE(translate_attempts, 0) >= ?
-       AND {_ANALYSIS_NEEDED}
-"""
-
 
 def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -130,14 +99,84 @@ def is_transient(exc: Exception) -> bool:
     return any(hint in text for hint in TRANSIENT_HINTS)
 
 
-def pending_rows(conn, max_attempts: int) -> list[dict]:
-    """本轮要做完整分析（翻译+判断+标签）的条目：新条目 + 失败的条目。"""
-    return [dict(r) for r in conn.execute(PENDING_SQL, (max_attempts,)).fetchall()]
+def _normalize_item_ids(item_ids):
+    if item_ids is None:
+        return None
+    result = []
+    for value in item_ids:
+        if isinstance(value, bool):
+            continue
+        try:
+            item_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if item_id not in result:
+            result.append(item_id)
+    return result
 
 
-def stuck_count(conn, max_attempts: int) -> int:
+def pending_rows(conn, max_attempts: int, item_ids=None) -> list[dict]:
+    """选出指定增量或全库中缺少完整分析字段且未达重试上限的记录。"""
+    ids = _normalize_item_ids(item_ids)
+    if ids == []:
+        return []
+    sql = "SELECT * FROM items WHERE raw IS NOT NULL AND TRIM(raw) <> ''"
+    args = []
+    if ids is not None:
+        sql += " AND id IN (" + ",".join("?" for _ in ids) + ")"
+        args.extend(ids)
+    rows = conn.execute(sql + " ORDER BY COALESCE(ts, 0) DESC, id DESC", args).fetchall()
+    picked = []
+    for row in rows:
+        item = dict(row)
+        item["attempts"] = int(item.get("translate_attempts") or 0)
+        if missing_analysis_fields(item) and item["attempts"] < max_attempts:
+            picked.append(item)
+    return picked
+
+
+def stuck_count(conn, max_attempts: int, item_ids=None) -> int:
     """失败次数已用完、被放弃的条目数（用来提示用户改配置或手工处理）。"""
-    return int(conn.execute(STUCK_SQL, (max_attempts,)).fetchone()[0] or 0)
+    ids = _normalize_item_ids(item_ids)
+    if ids == []:
+        return 0
+    sql = "SELECT * FROM items WHERE raw IS NOT NULL AND TRIM(raw) <> ''"
+    args = []
+    if ids is not None:
+        sql += " AND id IN (" + ",".join("?" for _ in ids) + ")"
+        args.extend(ids)
+    rows = conn.execute(sql, args).fetchall()
+    return sum(1 for row in rows
+               if missing_analysis_fields(dict(row))
+               and int(row["translate_attempts"] or 0) >= max_attempts)
+
+
+def promote_complete_collected(conn, item_ids=None) -> int:
+    """Advance imported, already-complete collected rows into the normal judge stage."""
+    ids = _normalize_item_ids(item_ids)
+    if ids == []:
+        return 0
+    sql = ("SELECT * FROM items WHERE COALESCE(stage, 'collected')='collected' "
+           "AND raw IS NOT NULL AND TRIM(raw) <> ''")
+    args = []
+    if ids is not None:
+        sql += " AND id IN (" + ",".join("?" for _ in ids) + ")"
+        args.extend(ids)
+    rows = conn.execute(sql, args).fetchall()
+    ids = [int(row["id"]) for row in rows if not missing_analysis_fields(dict(row))]
+    if not ids:
+        return 0
+    for item_id in ids:
+        ensure_processing_event(conn, item_id)
+    stamp = now()
+    conn.executemany(
+        "UPDATE items SET stage='translated', decision=NULL, reason='', "
+        "translated_at=COALESCE(NULLIF(translated_at,''), ?), "
+        "rev=COALESCE(rev,0)+1 WHERE id=? AND COALESCE(stage,'collected')='collected'",
+        [(stamp, item_id) for item_id in ids],
+    )
+    conn.commit()
+    return len(ids)
 
 
 
@@ -192,17 +231,18 @@ def known_titles(conn, exclude_id, limit: int = 0) -> list:
     return [f"#{r[0]} {r[1]}" for r in rows]
 
 
-def save_ok(conn, item: dict, analysis: dict, attempts: int) -> None:
+def save_ok(conn, item: dict, analysis: dict, attempts: int) -> bool:
     """完整分析成功：写译文 + 四盏灯 + 标题/要点/重要度 + 标签 + 被引用正文的译文。"""
     # 完整分析（包括修复缺灯）成功后必须回到 translated，让 judge 基于新灯重新判定。
     new_stage = "translated"
     stamp = now()
-    conn.execute(
+    cursor = conn.execute(
         "UPDATE items SET zh=?, quoted_zh=?, ai_tags=?, is_news=?, not_repeat=?, not_comment=?, not_sensitive=?, "
         "repeat_of=?, ai_title=?, ai_summary=?, importance=?, ai_score=?, "
-        "stage=?, decision=NULL, reason='', translate_error='', translate_attempts=?, meta_error='', meta_attempts=0, "
+        "stage=?, decision=NULL, reason='', translate_error='', translate_attempts=?, "
         "translated_at=?, processed_at=?, "
-        "rev=COALESCE(rev, 0) + 1 WHERE id=?",
+        "rev=COALESCE(rev, 0) + 1 WHERE id=? AND raw IS ? AND quoted_raw IS ? "
+        "AND quoted_account IS ? AND account IS ?",
         (
             analysis["zh"],
             _quoted_zh(analysis),
@@ -222,24 +262,33 @@ def save_ok(conn, item: dict, analysis: dict, attempts: int) -> None:
             stamp,
             stamp,
             item["id"],
+            item.get("raw"),
+            item.get("quoted_raw"),
+            item.get("quoted_account"),
+            item.get("account"),
         ),
     )
+    return getattr(cursor, "rowcount", 1) == 1
 
 
 
 def save_failed(conn, item: dict, error: Exception, attempts: int) -> None:
     """翻译的永久性失败：记错误并消耗一次重试机会。"""
     conn.execute(
-        "UPDATE items SET translate_error=?, translate_attempts=? WHERE id=?",
-        (one_line(str(error)), attempts, item["id"]),
+        "UPDATE items SET translate_error=?, translate_attempts=? "
+        "WHERE id=? AND raw IS ? AND quoted_raw IS ? AND quoted_account IS ? AND account IS ?",
+        (one_line(str(error)), attempts, item["id"], item.get("raw"),
+         item.get("quoted_raw"), item.get("quoted_account"), item.get("account")),
     )
 
 
 def save_transient(conn, item: dict, error: Exception) -> None:
     """翻译的临时失败（限流/超时）：只记错误，**不消耗**重试次数，下一轮继续试。"""
     conn.execute(
-        "UPDATE items SET translate_error=? WHERE id=?",
-        (one_line(str(error)), item["id"]),
+        "UPDATE items SET translate_error=? WHERE id=? AND raw IS ? AND quoted_raw IS ? "
+        "AND quoted_account IS ? AND account IS ?",
+        (one_line(str(error)), item["id"], item.get("raw"), item.get("quoted_raw"),
+         item.get("quoted_account"), item.get("account")),
     )
 
 
@@ -271,7 +320,7 @@ def analyze_with_retry(text: str, tag: str, account: str = "", known=None,
     result, error, auth_failed = run_with_retry(
         lambda: analyze_item(text, account, known, quoted_account, quoted_raw), tag)
     # 模型偶尔漏字段或输出坏 JSON 时，立即用明确校验反馈再做一次完整分析；
-    # 这不是补标调用，也不写入不完整结果。
+    # 只有全部必需字段齐全才会写库。
     if result is None and isinstance(error, ValueError):
         log(f"[格式重试] {tag} 完整分析结果未通过校验：{one_line(str(error))}")
         result, error, auth_failed = run_with_retry(
@@ -281,10 +330,16 @@ def analyze_with_retry(text: str, tag: str, account: str = "", known=None,
 
 
 
-def translate_pass(conn) -> tuple[int, int, int, bool]:
+def translate_pass(conn, item_ids=None) -> tuple[int, int, int, bool]:
     """① 完整分析一遍：返回 (成功, 永久失败, 限流待重试, 是否认证中止)。"""
-    todo = pending_rows(conn, TRANSLATE_MAX_ATTEMPTS)
-    stuck = stuck_count(conn, TRANSLATE_MAX_ATTEMPTS)
+    promoted = promote_complete_collected(conn, item_ids)
+    if promoted:
+        log(f"[扫描] {promoted} 条已有完整分析的采集记录进入判定阶段")
+    todo = pending_rows(conn, TRANSLATE_MAX_ATTEMPTS, item_ids)
+    stuck = stuck_count(conn, TRANSLATE_MAX_ATTEMPTS, item_ids)
+    for item in todo:
+        ensure_processing_event(conn, item["id"])
+    conn.commit()
     if not todo:
         log("[检查] 没有待翻译/待重试的条目")
         if stuck:
@@ -310,8 +365,11 @@ def translate_pass(conn) -> tuple[int, int, int, bool]:
             return ok, failed, transient_left, True
 
         if analysis:
-            save_ok(conn, item, analysis, attempts)
+            saved = save_ok(conn, item, analysis, attempts)
             conn.commit()          # 逐条提交：中断也不丢已完成的部分
+            if not saved:
+                log(f"[增量过期 {tag}] @{item['account']} 分析期间原文已变化，丢弃旧回复等待新事件")
+                continue
             ok += 1
             log(f"[翻译OK {tag}] @{item['account']} 第{attempts}次 | {describe(analysis)} "
                 f"| {one_line(analysis['zh'])}")
@@ -365,7 +423,7 @@ def describe(analysis: dict) -> str:
     return " | ".join(parts)
 
 
-def _run_processing() -> int:
+def _run_processing(item_ids=None) -> int:
     log("=" * 55)
     log("航小麦 · 完整分析（翻译 + 四盏灯 + 标题/摘要/分数/标签）")
 
@@ -374,13 +432,28 @@ def _run_processing() -> int:
         f"输出上限={summary['max_tokens'] or '服务端默认'}")
 
     if not is_configured():
-        log(f"[错误] 模型 API 未配置完整，缺少：{'、'.join(missing_config())}，本轮跳过")
+        conn = open_db()
+        try:
+            promoted = promote_complete_collected(conn, item_ids)
+            todo = pending_rows(conn, TRANSLATE_MAX_ATTEMPTS, item_ids)
+            stuck = stuck_count(conn, TRANSLATE_MAX_ATTEMPTS, item_ids)
+            for item in todo:
+                ensure_processing_event(conn, item["id"])
+            conn.commit()
+            scope = "指定增量" if item_ids is not None else "全库"
+            log(f"[扫描] {scope}检查完成：待完整分析 {len(todo)} 条，完整采集转入判定 {promoted} 条，"
+                f"达到重试上限 {stuck} 条")
+        finally:
+            conn.close()
+        log(f"[等待] 模型 API 未配置完整，缺少：{'、'.join(missing_config())}；不完整条目保留在订阅队列")
         log("       配置入口：看板 → 处理服务 → 配置（MODEL_API_KEY / MODEL_API_BASE / MODEL_NAME）")
-        return 1
+        # Keep already-complete rows moving through judge/fallback. Incomplete rows
+        # remain on the durable subscription and will retry after their backoff.
+        return 0
 
     conn = open_db()
     try:
-        ok, failed, transient_left, aborted = translate_pass(conn)
+        ok, failed, transient_left, aborted = translate_pass(conn, item_ids)
         if aborted:
             log(f"[结果] 已中止：成功 {ok} 条，失败 {failed} 条（认证问题不消耗重试次数）")
             log("       填好 key 后重新启动处理服务即可继续")
@@ -402,9 +475,18 @@ def _run_processing() -> int:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--item-ids", help="仅处理订阅收到的逗号分隔条目 ID")
+    args = parser.parse_args()
+    item_ids = None
+    if args.item_ids is not None:
+        item_ids = _normalize_item_ids(args.item_ids.split(","))
+        if not item_ids:
+            log("[错误] --item-ids 没有有效条目 ID")
+            return 2
     write_progress(True, "正在检查处理队列")
     try:
-        return _run_processing()
+        return _run_processing(item_ids)
     finally:
         write_progress(False, "本轮处理结束")
 
