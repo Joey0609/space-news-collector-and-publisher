@@ -16,7 +16,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .paths import HX_ROOT, STATE_FILE
+from .paths import HX_ROOT
 
 DB_FILE = HX_ROOT / "data" / "hx.sqlite3"
 
@@ -43,30 +43,6 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def _seed_legacy(conn) -> None:
-    """迁移旧 state.json 唯一记住的 group_openid（只补缺，不覆盖现有群设置）。"""
-    try:
-        if conn.execute("SELECT 1 FROM meta WHERE key='alison_groups_seeded'").fetchone():
-            return
-    except sqlite3.Error:
-        return
-    try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8-sig")) if STATE_FILE.exists() else {}
-    except Exception:
-        data = {}
-    group_openid = str(data.get("group_openid") or "").strip() if isinstance(data, dict) else ""
-    if group_openid:
-        conn.execute(
-            "INSERT OR IGNORE INTO alison_groups(group_openid, joined_at, updated_at) VALUES(?,?,?)",
-            (group_openid, "", _now()))
-    try:
-        conn.execute("INSERT INTO meta(key,value) VALUES('alison_groups_seeded','1') "
-                     "ON CONFLICT(key) DO UPDATE SET value='1'")
-    except sqlite3.Error:
-        pass
-    conn.commit()
-
-
 def _tags_json(value) -> str:
     if isinstance(value, str):
         try:
@@ -89,7 +65,6 @@ def upsert_group(group_openid: str, info: dict | None = None, *, joined_at: str 
     info = info if isinstance(info, dict) else {}
     conn = connect(db_file)
     try:
-        _seed_legacy(conn)
         now = _now()
         conn.execute(
             "INSERT INTO alison_groups(group_openid,group_name,group_finger_memo,group_class_text,"
@@ -169,7 +144,6 @@ def set_push_enabled(group_openid: str, enabled: bool, db_file=None) -> dict:
 def get_group(group_openid: str, db_file=None) -> dict:
     conn = connect(db_file)
     try:
-        _seed_legacy(conn)
         row = conn.execute("SELECT * FROM alison_groups WHERE group_openid=?",
                            (str(group_openid or "").strip(),)).fetchone()
         return _row(row) if row else {}
@@ -203,7 +177,6 @@ def _row(row) -> dict:
 def list_groups(*, members_only: bool = False, enabled_only: bool = False, db_file=None) -> list:
     conn = connect(db_file)
     try:
-        _seed_legacy(conn)
         where = []
         if members_only:
             where.append("is_member=1")

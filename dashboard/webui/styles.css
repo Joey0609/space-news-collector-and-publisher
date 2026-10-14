@@ -740,79 +740,9 @@ dialog::backdrop {
     font-variant-numeric: tabular-nums
 }
 
-/* 四盏灯：是新闻 / 不重复 / 非评价 / 非敏感政治 */
-.lights {
-    display: inline-flex;
-    gap: 4px;
-    margin-right: 6px;
-    vertical-align: middle
-}
+/* 完整分析给出的无效原因 */
+.invalid-reason { color: var(--muted); font-size: 13px; margin: 6px 0; }
 
-.light {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    display: inline-block;
-    border: 1px solid rgba(0, 0, 0, .18);
-    position: relative
-}
-
-/* 鼠标一放上去立刻出提示（原生 title 要等一秒，所以自己画） */
-.light[data-tip]:hover::after {
-    content: attr(data-tip);
-    position: absolute;
-    bottom: calc(100% + 9px);
-    left: 50%;
-    transform: translateX(-50%);
-    padding: 6px 10px;
-    border-radius: 8px;
-    background: #16233a;
-    color: #fff;
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1.4;
-    white-space: nowrap;
-    z-index: 40;
-    pointer-events: none;
-    box-shadow: 0 10px 26px rgba(15, 35, 65, .3)
-}
-
-.light[data-tip]:hover::before {
-    content: "";
-    position: absolute;
-    bottom: calc(100% + 4px);
-    left: 50%;
-    transform: translateX(-50%);
-    border: 5px solid transparent;
-    border-top-color: #16233a;
-    z-index: 41;
-    pointer-events: none
-}
-
-/* 第一盏灯的提示往右展开，避免超出卡片左边界 */
-.lights .light:first-child[data-tip]:hover::after {
-    left: 0;
-    transform: none
-}
-
-.lights .light:first-child[data-tip]:hover::before {
-    left: 4px;
-    transform: none
-}
-
-.light-on {
-    background: #2fb45f;
-    box-shadow: 0 0 0 2px rgba(47, 180, 95, .18)
-}
-
-.light-off {
-    background: #e05252;
-    box-shadow: 0 0 0 2px rgba(224, 82, 82, .18)
-}
-
-.light-unknown {
-    background: #cbd5e1
-}
 
 /* 台账筛选按钮 */
 .filters {

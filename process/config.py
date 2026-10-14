@@ -88,17 +88,14 @@ def missing_config() -> list:
     return missing
 
 
-# ---- 翻译 ----
+# ---- 完整分析 ----
 # 每次轮到一条最多完整分析这么多次；仍失败移到队尾，累计次数不限。
-TRANSLATE_MAX_ATTEMPTS = int(_env('TRANSLATE_MAX_ATTEMPTS') or 3)
-TRANSLATE_PAUSE_SECONDS = float(_env('TRANSLATE_PAUSE_SECONDS') or 0.5)
+ANALYSIS_MAX_ATTEMPTS = int(_env('ANALYSIS_MAX_ATTEMPTS') or 3)
+ANALYSIS_PAUSE_SECONDS = float(_env('ANALYSIS_PAUSE_SECONDS') or 0.5)
 # 免费/共享模型经常 429（该模型访问量过大）或超时，这类"临时失败"当场等一会儿重试，
 # 属于一次完整分析中的请求重试；次数用完则轮转到后续内容，累计失败不判死。
-TRANSLATE_INLINE_RETRIES = int(_env('TRANSLATE_INLINE_RETRIES') or 2)
-TRANSLATE_RATE_LIMIT_WAIT = float(_env('TRANSLATE_RATE_LIMIT_WAIT') or 20)
+ANALYSIS_INLINE_RETRIES = int(_env('ANALYSIS_INLINE_RETRIES') or 2)
+ANALYSIS_RATE_LIMIT_WAIT = float(_env('ANALYSIS_RATE_LIMIT_WAIT') or 20)
 
-# 判"第 2 盏灯（不重复）"时，给模型看多少条"最近已入库标题"用来对比；0 = 不给清单（只看文本线索）
+# 判定重复内容时，给模型看多少条"最近已入库标题"用来对比；0 = 不给清单（只看文本线索）
 AI_REPEAT_CONTEXT = int(_env('AI_REPEAT_CONTEXT') or 40)
-
-DEFAULT_TARGET_PRIVATE = 'YOUR_QQ_ID'
-DEFAULT_TARGET_GROUP = 'YOUR_GROUP_ID_1'

@@ -122,7 +122,7 @@ def _build_new_item(name: str, latest, ts: int, baseline: dict,
     # 为什么要存：被引用那条往往才是"新闻本体"（引用者只加一句感想），
     # 之前这些信息全被丢掉，模型只看到引用者那句话。
     # 存了之后：① 进 AI 提示词参与判定 ② 翻译阶段产出 quoted_zh
-    # ③ 有引用的条目第 3 盏灯（not_comment）会被强制判绿，见 process/translate_db.py。
+    # ③ 引用正文与主帖一起交给完整 AI 分析，不在采集或分发阶段额外判定。
     quoted_account = quoted_raw = quoted_url = ""
     if qt is not None:
         quoted_author = getattr(qt, "author", None)

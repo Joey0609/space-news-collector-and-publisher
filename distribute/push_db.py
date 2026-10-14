@@ -16,8 +16,7 @@
   已经"旧 source 全都发过"的行 → 新 source 记 true（不把历史全量灌给新通道）；
   还在途中的行、以及注册之后新建的行 → 记 false（新通道照样能取到）。
 - 发送成功后由分发端调用 `mark_pushed()` 置 true，同时往 `pushes` 表写一条幂等审计。
-- 全程**不再读写** `待推送.json` / `队列档案.json`；旧文件只在首次迁移时读一次，
-  见 `_seed_legacy()`（只读，不写）。
+- 分发只读写新结构 SQLite，不读取旧 JSON 队列。
 
 任何入口先 `ensure_schema()`（collect/db.py）或本模块的 `_ensure()`，缺列会自动补。
 """
@@ -31,13 +30,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DB_FILE = REPO / "data" / "hx.sqlite3"
-QUEUE_DIR = REPO / "data" / "queue"
-
-# 迁移只在首次跑一次：读旧队列的 sent_to + 旧已发记录，把"已经发过"的行标成 true。
-LEGACY_QUEUE_FILES = (QUEUE_DIR / "待推送.json", REPO / "config" / "待推送.json")
-LEGACY_SENT_FILES = (QUEUE_DIR / "已发记录.json",)
-SEED_FLAG = "push_seeded"
-
 PASSED_SQL = "TRIM(COALESCE(decision, '')) = '发' AND COALESCE(stage, '') = 'processed'"
 PENDING_MAX_AGE_SECONDS = 5 * 24 * 60 * 60
 
@@ -64,49 +56,15 @@ def split_source(source: str) -> tuple:
 # ────────────────────────── 连接与建表 ──────────────────────────
 
 def connect(db_file=None) -> sqlite3.Connection:
-    """连库（WAL + busy timeout），并补齐 pushed 列 / pushes 表 / meta 表。"""
+    """连接唯一的新结构数据库（WAL + busy timeout）。"""
     path = Path(db_file or DB_FILE)
     conn = sqlite3.connect(str(path), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
-    _ensure(conn)
-    return conn
-
-
-def _ensure(conn: sqlite3.Connection) -> None:
-    """缺列补列、缺表建表。表和列的"正式出处"仍是 collect/db.py 的 SCHEMA，
-    这里每次连接都调用它，让分发端也能把旧库升级到最终输出池的字段契约。"""
-    conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
-    # 全新库（看板先启动、采集还没跑）和缺少 stage 的旧库都按正式 schema 补齐。
     from collect.db import ensure_schema
     ensure_schema(conn)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(items)").fetchall()}
-    if "pushed" not in cols:
-        conn.execute("ALTER TABLE items ADD COLUMN pushed TEXT DEFAULT '{}'")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS pushes(id INTEGER PRIMARY KEY, item_id INTEGER,"
-        " channel TEXT DEFAULT '', kind TEXT DEFAULT '', source TEXT, sent_at TEXT,"
-        " UNIQUE(source, item_id))"
-    )
-    push_cols = {row[1] for row in conn.execute("PRAGMA table_info(pushes)")}
-    if "source" not in push_cols:
-        conn.execute("ALTER TABLE pushes ADD COLUMN source TEXT")
-    if "sent_at" not in push_cols:
-        conn.execute("ALTER TABLE pushes ADD COLUMN sent_at TEXT")
-    if "sent_ts" in push_cols:
-        conn.execute("UPDATE pushes SET sent_at=COALESCE(sent_at,CAST(sent_ts AS TEXT))")
-    conn.execute("UPDATE pushes SET source=channel||':'||kind WHERE source IS NULL"
-                 " AND COALESCE(channel,'')<>'' AND COALESCE(kind,'')<>''")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS pushes_source_item_unique"
-                 " ON pushes(source,item_id)")
-    conn.execute("CREATE TABLE IF NOT EXISTS push_attempts("
-                 "id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, channel TEXT NOT NULL,"
-                 "kind TEXT NOT NULL, source TEXT NOT NULL, attempted_at TEXT NOT NULL,"
-                 "status TEXT NOT NULL, detail TEXT DEFAULT '')")
-    conn.execute("CREATE INDEX IF NOT EXISTS push_attempts_recent"
-                 " ON push_attempts(attempted_at DESC,id DESC)")
-    conn.commit()
+    return conn
 
 
 def record_attempt(item_id: int, source: str, status: str, detail: str = "", db_file=None) -> None:
@@ -183,8 +141,6 @@ def _row_to_item(row) -> dict:
     item["pushed"] = _parse_pushed(item.get("pushed"))
     item["images"] = _parse_images(item.get("images"))
     score = item.get("ai_score")
-    if score is None:
-        score = item.get("rules_score")
     item["score"] = score if score is not None else 0
     return item
 
@@ -241,8 +197,6 @@ def register_sources(sources, db_file=None) -> list:
             conn.execute("UPDATE items SET pushed=? WHERE id=?",
                          (json.dumps(pushed, ensure_ascii=False), row["id"]))
         _set_registry(conn, full)
-        conn.commit()
-        _seed_legacy(conn, full)                  # 首次注册时把旧 JSON 的状态搬进来
         conn.commit()
         return new
     finally:
@@ -349,7 +303,6 @@ def mark_pushed(item_ids, source: str, db_file=None) -> int:
     channel, kind = split_source(source)
     conn = connect(db_file)
     try:
-        legacy_sent_ts = "sent_ts" in {row[1] for row in conn.execute("PRAGMA table_info(pushes)")}
         if source not in _registry(conn):          # 兜底：没注册过也补上，状态别丢
             _set_registry(conn, _registry(conn) + [source])
         changed = 0
@@ -364,102 +317,12 @@ def mark_pushed(item_ids, source: str, db_file=None) -> int:
                 conn.execute("UPDATE items SET pushed=?, rev=COALESCE(rev, 0) + 1 WHERE id=?",
                              (json.dumps(pushed, ensure_ascii=False), item_id))
                 changed += 1
-            if legacy_sent_ts:
-                conn.execute("INSERT OR IGNORE INTO pushes(item_id,channel,kind,source,sent_at,sent_ts)"
-                             " VALUES(?,?,?,?,?,?)", (item_id, channel, kind, source, now, now))
-            else:
-                conn.execute("INSERT OR IGNORE INTO pushes(item_id,channel,kind,source,sent_at)"
-                             " VALUES(?,?,?,?,?)", (item_id, channel, kind, source, now))
+            conn.execute("INSERT OR IGNORE INTO pushes(item_id,channel,kind,source,sent_at)"
+                         " VALUES(?,?,?,?,?)", (item_id, channel, kind, source, now))
             if conn.execute("SELECT 1 FROM pushes WHERE source=? AND item_id=?",
                             (source, item_id)).fetchone() is None:
                 raise RuntimeError(f"已发审计未落库 item={item_id} source={source}")
         conn.commit()
         return changed
-    finally:
-        conn.close()
-
-
-# ────────────────────────── 旧 JSON 状态一次性迁移 ──────────────────────────
-
-def _read_json_list(path: Path) -> list:
-    try:
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-            return data if isinstance(data, list) else []
-    except Exception:
-        pass
-    return []
-
-
-def _legacy_key(entry: dict) -> tuple:
-    return (str(entry.get("account", "") or ""), str(entry.get("zh", "") or ""))
-
-
-def _seed_legacy(conn, known: list) -> int:
-    """把旧 `待推送.json`（sent_to）与旧 `已发记录.json` 的状态搬到 items.pushed 上。
-
-    只在首次注册 source 时跑一次（meta.push_seeded）。判断依据：
-      · 在旧队列里 → 照它的 sent_to 精确标（列过的 kind 对应的 source 标 true，其余留 false）
-      · 不在旧队列、但 id 不大于旧队列里最大 id → 当年入过队、发完才被移除 → 全 source 标 true
-      · 不在旧队列、id 更大 → 是队列写下之后新判定的，留给分发端去发
-      · 在旧已发记录里 → 全 source 标 true（两个通道共用这一份文件，无法再细究是谁发的）
-    旧文件**只读不写**；迁移完不再回头看它们。
-    """
-    if _meta_get(conn, SEED_FLAG):
-        return 0
-    if not known:
-        return 0
-
-    queue_entries = []
-    for path in LEGACY_QUEUE_FILES:
-        queue_entries.extend(_read_json_list(path))
-    sent_keys = set()
-    for path in LEGACY_SENT_FILES:
-        for entry in _read_json_list(path):
-            sent_keys.add(_legacy_key(entry))
-
-    if queue_entries:
-        by_key = {}
-        max_queue_id = 0
-        for entry in queue_entries:
-            by_key[_legacy_key(entry)] = entry
-            try:
-                max_queue_id = max(max_queue_id, int(entry.get("id") or 0))
-            except (TypeError, ValueError):
-                pass
-    else:
-        by_key, max_queue_id = {}, 0
-
-    seeded = 0
-    for row in conn.execute("SELECT id, account, zh, pushed FROM items").fetchall():
-        pushed = _parse_pushed(row["pushed"])
-        key = (str(row["account"] or ""), str(row["zh"] or ""))
-        marks = set()
-        entry = by_key.get(key)
-        if entry is not None:
-            kinds = {str(x) for x in (entry.get("sent_to") or [])}
-            marks = {s for s in known if split_source(s)[1] in kinds}
-        elif key in sent_keys:
-            marks = set(known)
-        elif max_queue_id and int(row["id"]) <= max_queue_id:
-            marks = set(known)
-        if not marks:
-            continue
-        for source in marks:
-            pushed[source] = True
-        conn.execute("UPDATE items SET pushed=? WHERE id=?",
-                     (json.dumps(pushed, ensure_ascii=False), row["id"]))
-        seeded += 1
-    _meta_set(conn, SEED_FLAG, "1")
-    return seeded
-
-
-def seed_if_needed(db_file=None) -> int:
-    """手工触发一次迁移（tools/自检用）；已经迁过就返回 0。"""
-    conn = connect(db_file)
-    try:
-        count = _seed_legacy(conn, _registry(conn))
-        conn.commit()
-        return count
     finally:
         conn.close()

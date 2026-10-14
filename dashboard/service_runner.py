@@ -37,7 +37,7 @@ if not PROJECT_PYTHON.is_file():
     raise RuntimeError(f"项目虚拟环境不存在: {PROJECT_PYTHON}；请先创建并安装依赖")
 COMMANDS = {
     "collect": [str(PROJECT_PYTHON), str(ROOT / "main_flow.py"), "--collect-only"],
-    "process": [str(PROJECT_PYTHON), str(ROOT / "main_flow.py"), "--process-only"],
+    "process": [str(PROJECT_PYTHON), str(ROOT / "process" / "analyze_db.py")],
 }
 INTERVALS = {"collect": 600, "web": 900}
 EVENT_POLL_SECONDS = 0.5
@@ -110,7 +110,7 @@ def _event_connection(initialize=False):
 def read_processing_events(due_only=True, limit=EVENT_BATCH_SIZE):
     conn = _event_connection()
     try:
-        sql = "SELECT item_id,generation,attempts FROM processing_events"
+        sql = "SELECT item_id,generation FROM processing_events"
         args = []
         if due_only:
             sql += " WHERE available_at<=?"
@@ -125,84 +125,46 @@ def read_processing_events(due_only=True, limit=EVENT_BATCH_SIZE):
 def retry_cooldown() -> float:
     from process.model_endpoints import read_env
     try:
-        delay = float(read_env(ROOT / '.env').get('TRANSLATE_RATE_LIMIT_WAIT', '20'))
+        delay = float(read_env(ROOT / '.env').get('ANALYSIS_RATE_LIMIT_WAIT', '20'))
         return max(1.0, delay) if math.isfinite(delay) else 20.0
     except (ValueError, OSError):
         return 20.0
 
 
-def settle_processing_events(events, returncode: int) -> None:
-    """Ack completed items; defer only the failed/incomplete IDs with backoff."""
-    if not events:
-        return
-    item_ids = sorted({int(event["item_id"]) for event in events})
-    delay = retry_cooldown()
-    conn = _event_connection()
-    try:
-        placeholders = ",".join("?" for _ in item_ids)
-        rows = conn.execute(
-            f"SELECT * FROM items WHERE id IN ({placeholders})", item_ids).fetchall()
-        by_id = {int(row["id"]): dict(row) for row in rows}
-        from process.analysis_contract import missing_analysis_fields
-        for event in events:
-            item_id = int(event["item_id"])
-            generation = int(event["generation"])
-            item = by_id.get(item_id)
-            done = item is None or (
-                str(item.get("stage") or "") == "processed"
-                and not missing_analysis_fields(item)
-            )
-            if done:
-                conn.execute("DELETE FROM processing_events WHERE item_id=? AND generation=?",
-                             (item_id, generation))
-                continue
-            # 到达本次尝试次数后移到队尾；短暂冷却避免队列只有失败项时空转。
-            latest = conn.execute("SELECT MAX(created_at) FROM processing_events").fetchone()[0]
-            tail = datetime.now()
-            if latest:
-                try:
-                    tail = max(tail, datetime.fromisoformat(latest) + timedelta(microseconds=1))
-                except ValueError:
-                    pass
-            conn.execute(
-                "UPDATE processing_events SET available_at=?,attempts=attempts+1,created_at=? "
-                "WHERE item_id=? AND generation=?",
-                (time.time() + delay, tail.isoformat(timespec='microseconds'), item_id, generation),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def restore_processing_events() -> None:
-    """启动时找回旧重试上限造成的漏项，不改变累计次数和原有事件版本。"""
+def restore_processing_events() -> int:
+    """启动只核对一次：清理失效事件，为未完成的原文建立事件。"""
     conn = _event_connection(initialize=True)
-    # 恢复旧逻辑已删除事件的失败项，以及离线导入的未完成项。
     from collect.db import ensure_processing_event
     from process.analysis_contract import processing_required
+    conn.execute("DELETE FROM processing_events WHERE item_id NOT IN (SELECT id FROM items)")
+    count = 0
     for row in conn.execute("SELECT * FROM items WHERE raw IS NOT NULL AND TRIM(raw)<>''").fetchall():
         if processing_required(dict(row)):
             ensure_processing_event(conn, row['id'])
+            count += 1
+        else:
+            conn.execute("DELETE FROM processing_events WHERE item_id=?", (row['id'],))
     conn.commit()
     conn.close()
+    return count
 
 
 def run_processing_subscription() -> None:
-    """启动时恢复队列，之后只轮转持久事件，不周期性重扫全库。"""
-    restore_processing_events()
-    print("[process] 启动时执行一次全库完整性扫描", flush=True)
-    startup = read_processing_events(due_only=False, limit=100000)
-    if startup:
-        result = run_command("process", [event['item_id'] for event in startup])
-        settle_processing_events(startup, result)
+    count = restore_processing_events()
+    print(f"[process] 启动核对完成，待完整分析 {count} 条", flush=True)
     while True:
         events = read_processing_events(due_only=True)
         if not events:
             time.sleep(EVENT_POLL_SECONDS)
             continue
-        item_ids = list(dict.fromkeys(int(event["item_id"]) for event in events))
-        result = run_command("process", item_ids)
-        settle_processing_events(events, result)
+        result = run_command('process', [event['item_id'] for event in events])
+        # 分析程序逐条提交与确认。异常退出时仅冷却尚未确认的同版本事件。
+        if result:
+            conn = _event_connection()
+            conn.executemany("UPDATE processing_events SET available_at=? WHERE item_id=? AND generation=? AND available_at<=?",
+                             [(time.time()+retry_cooldown(), e['item_id'], e['generation'], time.time()) for e in events])
+            conn.commit()
+            conn.close()
 
 
 def collection_groups(names=None):

@@ -53,40 +53,11 @@ import collect.db as cdb          # noqa: E402
 from distribute import push_db    # noqa: E402
 
 push_db.DB_FILE = DB
-# 关掉"旧 JSON 一次性迁移"：否则会读到真实仓库的 data/queue/待推送.json，
-# 把 id 比它小的沙箱条目全标成"已发过"（迁移规则本身没错，但自检里不能这么脏）
-push_db.LEGACY_QUEUE_FILES = ()
-push_db.LEGACY_SENT_FILES = ()
-
 import dashboard.channels as ch   # noqa: E402
 from dashboard.ws import ChannelWSServer   # noqa: E402
 from distribute.ws_channel import ChannelClient  # noqa: E402
 
 ch.DB_FILE = DB
-
-# 旧部署的 pushes 只有 sent_ts/detail，QQ 发成功后曾因缺 source 写库失败。
-legacy_db = SANDBOX / "legacy_pushes.sqlite3"
-legacy = sqlite3.connect(legacy_db)
-legacy.execute("CREATE TABLE items(id INTEGER PRIMARY KEY,decision TEXT,pushed TEXT,rev INTEGER,stage TEXT)")
-legacy.execute("INSERT INTO items VALUES(1,'发','{}',1,'processed')")
-legacy.execute("INSERT INTO items VALUES(2,'发','{}',1,'processed')")
-legacy.execute("CREATE TABLE pushes(id INTEGER PRIMARY KEY,item_id INTEGER,channel TEXT,"
-               "kind TEXT,sent_ts INTEGER,detail TEXT)")
-legacy.execute("INSERT INTO pushes(item_id,channel,kind,sent_ts,detail)"
-               " VALUES(1,'alison','group_abc',123,'旧记录')")
-legacy.commit()
-legacy.close()
-check("旧 pushes 表补齐 source/sent_at 并可标记已发",
-      push_db.mark_pushed([1, 2], "alison:group_abc", db_file=legacy_db) == 2 and
-      push_db.pending("alison:group_abc", db_file=legacy_db) == [])
-legacy = sqlite3.connect(legacy_db)
-check("旧分发记录保留并迁移 source",
-      legacy.execute("SELECT source,sent_at FROM pushes WHERE item_id=1").fetchone() ==
-      ("alison:group_abc", "123"))
-check("旧表的必填 sent_ts 也写入新成功记录",
-      legacy.execute("SELECT sent_ts FROM pushes WHERE source='alison:group_abc'"
-                     " AND item_id=2").fetchone() is not None)
-legacy.close()
 
 conn = sqlite3.connect(DB)
 cdb.ensure_schema(conn)
@@ -230,7 +201,7 @@ check("老渠道发过的条目不会灌给新通道（回填规则）",
       pushed_of(1).get("pull_probe:group_555") is True, pushed_of(1))
 
 print("[1c] 已连接渠道轮询处理输出池")
-add_item(13, "Pipeline", "处理输出订阅测试", stage="judged")
+add_item(13, "Pipeline", "处理输出订阅测试", stage="collected")
 output_source = "process_output_probe:group_333"
 push_db.register_sources([output_source], db_file=DB)
 push_db.mark_pushed([6], output_source, db_file=DB)  # 隔离上一段留下的历史样例
@@ -242,7 +213,7 @@ output_thread = threading.Thread(
     kwargs={"max_rounds": 1}, daemon=True)
 output_thread.start()
 time.sleep(0.3)
-check("stage=judged 时输出池不提前暴露", output_seen == [], output_seen)
+check("stage=collected 时输出池不提前暴露", output_seen == [], output_seen)
 conn = sqlite3.connect(DB)
 conn.execute("UPDATE items SET stage='processed' WHERE id=13")
 conn.commit()

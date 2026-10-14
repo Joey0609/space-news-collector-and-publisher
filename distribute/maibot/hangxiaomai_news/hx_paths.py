@@ -19,7 +19,6 @@ HX_ROOT = PROJECT_ROOT.parent                         # 航小麦根目录
 # ── 航小麦 配置/数据文件（与 collect/process/alison 共用）──
 CONFIG_DIR = HX_ROOT / "config"
 DATA_DIR = HX_ROOT / "data"
-QUEUE_DIR = DATA_DIR / "queue"
 STATE_DIR = DATA_DIR / "state"
 IMAGE_DIR = DATA_DIR / "images"
 # 分发队列由看板持有（dashboard/channels.py）：插件作为 WebSocket 渠道连过去，
@@ -28,7 +27,6 @@ IMAGE_DIR = DATA_DIR / "images"
 TOKEN_FILE = STATE_DIR / "dashboard_token.txt"
 SWITCH_FILE = CONFIG_DIR / "功能开关.toml"
 PUSH_DEFAULT_FILE = CONFIG_DIR / "推送默认.toml"
-ARCHIVE_FILE = QUEUE_DIR / "内容留档.json"
 REMINDER_FILE = CONFIG_DIR / "提醒待发.txt"
 STATE_FILE = STATE_DIR / "推送状态.json"
 

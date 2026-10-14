@@ -46,10 +46,9 @@ def test_api_envelope():
     push_db.DB_FILE = tmp / "hx.sqlite3"
     from distribute.alison.ali_core import env as alison_env, groups as alison_groups
     alison_saved = (server.alison_config.DB_FILE, alison_env.ENV_FILE,
-                    alison_groups.DB_FILE, alison_groups.STATE_FILE)
+                    alison_groups.DB_FILE)
     server.alison_config.DB_FILE = tmp / "hx.sqlite3"
     alison_groups.DB_FILE = tmp / "hx.sqlite3"
-    alison_groups.STATE_FILE = tmp / "alison_state.json"
     alison_env.ENV_FILE = tmp / "alison.env"
     httpd = ThreadingHTTPServer(("127.0.0.1", port), server.Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -156,7 +155,7 @@ def test_api_envelope():
         server.channel_hub.DB_FILE = original_channel_db
         push_db.DB_FILE = original_queue_db
         (server.alison_config.DB_FILE, alison_env.ENV_FILE,
-         alison_groups.DB_FILE, alison_groups.STATE_FILE) = alison_saved
+         alison_groups.DB_FILE) = alison_saved
         server.PROCESSES.clear()
         server.PROCESSES.update(original_processes)
         shutil.rmtree(tmp, ignore_errors=True)
@@ -264,7 +263,7 @@ def test_pagination_and_changes():
         assert server.changed_items(45, 1) == [], "没有任何变化时不该回条目"
 
         conn = sqlite3.connect(db)
-        conn.execute("UPDATE items SET rev=rev+1 WHERE id=7")   # 模拟 translate_db 就地写译文
+        conn.execute("UPDATE items SET rev=rev+1 WHERE id=7")   # 模拟 analyze_db 就地写译文
         conn.commit()
         conn.close()
         changed = server.changed_items(45, 1)
@@ -282,96 +281,55 @@ def test_pagination_and_changes():
 
 
 def test_process_backlog():
-    """唯一完整分析队列涵盖缺灯/缺元数据，且已达上限单独计数。"""
-    tmp = Path(__file__).resolve().parent / ".sandbox" / "process_backlog_case"
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True, exist_ok=True)
-    original_data = server.DATA
-    original_attempts = server._max_process_attempts
-    server.DATA = tmp
-    server._max_process_attempts = lambda: 3
+    from collect.db import ensure_schema
+    tmp=Path(__file__).resolve().parent/'.sandbox'/'process_backlog_case'
+    shutil.rmtree(tmp,ignore_errors=True);tmp.mkdir(parents=True)
+    original=server.DATA;server.DATA=tmp
     try:
-        conn = sqlite3.connect(tmp / "hx.sqlite3")
-        conn.execute("""CREATE TABLE items(
-            id INTEGER PRIMARY KEY, origin_id TEXT, account TEXT, raw TEXT, zh TEXT,
-            stage TEXT, ai_title TEXT, ai_score INTEGER, ai_tags TEXT, ai_summary TEXT,
-            importance TEXT, quoted_raw TEXT, quoted_zh TEXT,
-            is_news INTEGER, not_repeat INTEGER, not_comment INTEGER, not_sensitive INTEGER,
-            translate_attempts INTEGER, translate_error TEXT, ts INTEGER)""")
-        fields = ("id, origin_id, account, raw, zh, stage, ai_title, ai_score, ai_tags, "
-                  "ai_summary, importance, quoted_raw, quoted_zh, is_news, not_repeat, "
-                  "not_comment, not_sensitive, translate_attempts, translate_error, ts")
-        conn.execute(f"INSERT INTO items({fields}) VALUES(1,'2109939184257695951','Redwire','raw','译文',"
-                     "'processed','已有标题',65,'[\"领域:发射\"]','要点','高','','',1,NULL,1,1,1,'',100)")
-        conn.execute(f"INSERT INTO items({fields}) VALUES(2,'done','NASA','raw','译文',"
-                     "'processed','标题',80,'[\"领域:任务\"]','要点','高','','',1,1,1,1,1,'',90)")
-        conn.execute(f"INSERT INTO items({fields}) VALUES(3,'stuck','NASA','raw','译文',"
-                     "'processed','标题',NULL,'[\"领域:任务\"]','要点','高','','',1,1,1,1,3,'格式无效',80)")
-        conn.execute(f"INSERT INTO items({fields}) VALUES(4,'untranslated','X','raw','',"
-                     "'collected','',NULL,'','','','','',NULL,NULL,NULL,NULL,0,'',70)")
-        conn.execute(f"INSERT INTO items({fields}) VALUES(5,'no-summary','NASA','raw','译文',"
-                     "'processed','标题',80,'[\"领域:任务\"]','','高','','',1,1,1,1,0,'',60)")
-        conn.execute(f"INSERT INTO items({fields}) VALUES(6,'no-quote-zh','NASA','raw','译文',"
-                     "'processed','标题',80,'[\"领域:任务\"]','要点','高','引用正文','',1,1,1,1,1,'',50)")
-        conn.commit()
+        conn=sqlite3.connect(tmp/'hx.sqlite3');ensure_schema(conn)
+        for ident in range(1,7):
+            conn.execute("INSERT INTO items(id,raw,zh,ai_title,ai_summary,ai_score,ai_tags,importance,decision,stage) VALUES(?,'raw','译文','标题','摘要',70,'[\"领域:任务\"]','中','发','processed')",(ident,))
+        conn.execute("UPDATE items SET decision=NULL WHERE id=1")
+        conn.execute("UPDATE items SET ai_score=NULL,analysis_attempts=100 WHERE id=3")
+        conn.execute("UPDATE items SET zh='',stage='collected' WHERE id=4")
+        conn.execute("UPDATE items SET ai_summary='' WHERE id=5")
+        conn.execute("UPDATE items SET quoted_raw='引用正文' WHERE id=6")
+        conn.commit();conn.close()
+        result=server.process_backlog();by_id={x['id']:x for x in result['items']}
+        assert result['remaining_count']==5 and result['stuck_count']==0,result
+        assert '最终判定' in by_id[1]['missing'],by_id[1]
+        assert by_id[3]['attempts']==100 and not by_id[3]['stuck'],by_id[3]
+        assert '摘要' in by_id[5]['missing'] and '引用译文' in by_id[6]['missing'],result
+        server.update_item({'id':2,'raw':'new source revision'})
+        conn=sqlite3.connect(tmp/'hx.sqlite3')
+        assert conn.execute('SELECT stage,decision,zh FROM items WHERE id=2').fetchone()==('collected',None,'')
+        assert conn.execute('SELECT generation FROM processing_events WHERE item_id=2').fetchone()[0]==1
         conn.close()
-
-        result = server.process_backlog()
-        assert result["remaining_count"] == 5, result
-        assert result["ready_count"] == 5 and result["stuck_count"] == 0, result
-        by_id = {item["id"]: item for item in result["items"]}
-        assert "重复" in by_id[1]["missing"] and by_id[1]["phase"] == "待完整分析" and by_id[1]["attempts"] == 1, by_id[1]
-        assert not by_id[3]["stuck"] and "AI分" in by_id[3]["missing"], by_id[3]
-        assert by_id[4]["phase"] == "待完整分析", by_id[4]
-        assert "要点" in by_id[5]["missing"] and "引用译文" in by_id[6]["missing"], result
-        summary = server.process_backlog(include_items=False)
-        assert summary == {"items": [], "remaining_count": 5, "ready_count": 5, "stuck_count": 0}, summary
     finally:
-        server.DATA = original_data
-        server._max_process_attempts = original_attempts
-        shutil.rmtree(tmp, ignore_errors=True)
+        server.DATA=original;shutil.rmtree(tmp,ignore_errors=True)
 
 
 def test_processing_subscription_queue():
-    """The processor acks completed events and backs off incomplete increments."""
     from dashboard import service_runner as runner
-
-    tmp = Path(__file__).resolve().parent / ".sandbox" / "processing_event_case"
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True, exist_ok=True)
-    original_db = runner.DB_FILE
-    runner.DB_FILE = tmp / "hx.sqlite3"
+    from collect.db import ensure_processing_event,enqueue_processing_event
+    tmp=Path(__file__).resolve().parent/'.sandbox'/'processing_event_case'
+    shutil.rmtree(tmp,ignore_errors=True);tmp.mkdir(parents=True)
+    original=runner.DB_FILE;runner.DB_FILE=tmp/'hx.sqlite3'
     try:
-        conn = runner._event_connection()
-        conn.execute("""INSERT INTO items(id,raw,zh,is_news,not_repeat,not_comment,not_sensitive,
-            ai_score,ai_tags,ai_title,ai_summary,importance,stage)
-            VALUES(1,'raw','译文',1,1,1,1,70,'[\"领域:任务\"]','标题','要点','高','processed')""")
-        conn.execute("INSERT INTO items(id,raw,stage) VALUES(2,'new raw','collected')")
-        from collect.db import ensure_processing_event
-        ensure_processing_event(conn, 1)
-        ensure_processing_event(conn, 2)
-        conn.commit()
-        conn.close()
-
-        events = runner.read_processing_events(due_only=True)
-        assert [event["item_id"] for event in events] == [1, 2], events
-        runner.settle_processing_events(events, 0)
-        all_events = runner.read_processing_events(due_only=False)
-        assert len(all_events) == 1 and all_events[0]["item_id"] == 2, all_events
-        assert all_events[0]["attempts"] == 1, all_events
-        assert runner.read_processing_events(due_only=True) == [], "退避中的增量不应立即重跑"
-
-        conn = runner._event_connection()
-        from collect.db import enqueue_processing_event
-        enqueue_processing_event(conn, 2)
-        conn.commit()
-        conn.close()
-        fresh = runner.read_processing_events(due_only=True)
-        assert len(fresh) == 1 and fresh[0]["item_id"] == 2 and fresh[0]["generation"] == 2, fresh
-        assert "process" not in runner.INTERVALS, runner.INTERVALS
+        conn=runner._event_connection(initialize=True)
+        conn.execute("INSERT INTO items(id,raw,zh,ai_title,ai_summary,ai_score,ai_tags,importance,decision,stage) VALUES(1,'raw','译文','标题','摘要',70,'[\"领域:任务\"]','中','发','processed')")
+        conn.execute("INSERT INTO items(id,raw) VALUES(2,'new raw')")
+        for ident in (1,2,99):ensure_processing_event(conn,ident)
+        conn.commit();conn.close()
+        assert runner.restore_processing_events()==1
+        events=runner.read_processing_events()
+        assert len(events)==1 and events[0]['item_id']==2,events
+        conn=runner._event_connection();enqueue_processing_event(conn,2);conn.commit();conn.close()
+        assert runner.read_processing_events()[0]['generation']==2
+        assert runner.COMMANDS['process'][-1].endswith('analyze_db.py')
+        assert 'process' not in runner.INTERVALS
     finally:
-        runner.DB_FILE = original_db
-        shutil.rmtree(tmp, ignore_errors=True)
+        runner.DB_FILE=original;shutil.rmtree(tmp,ignore_errors=True)
 
 
 def test_launchers():

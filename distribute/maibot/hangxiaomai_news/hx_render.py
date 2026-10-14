@@ -15,12 +15,6 @@ import base64
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-if __package__ in (None, ""):
-    from hx_llm import translate_short
-else:
-    from .hx_llm import translate_short
-
-
 def fmt_beijing(date_str: str, ts) -> str:
     """UTC 时间 → "UTC+8-YYYY-MM-DD-HH:MM"；解析失败返回 ''。"""
     d = None
@@ -56,43 +50,9 @@ def build_source_line(item: dict) -> str:
     return "来源：" + " · ".join(parts)
 
 
-def forward_line(item: dict, logger=None) -> str:
-    """转推且转发者加了评论 → "转发@<账号>：<译文>"；否则返回 ''。"""
-    fc = str(item.get("forward_comment", "") or "").strip()
-    if not fc:
-        return ""
-    fa = str(item.get("account", "") or "")
-    tr = translate_short(fc, logger)
-    return (f"转发@{fa}：" + tr) if fa else ("转发者：" + tr)
-
-
-def quoted_text(item: dict) -> str:
-    """引用推文里【被引用的那条】的展示块；没有引用返回 ''。
-
-    优先用被引用正文的译文（items.quoted_zh），模型没给译文时退回原文。
-    """
-    raw = str(item.get("quoted_raw") or "").strip()
-    zh = str(item.get("quoted_zh") or "").strip()
-    if not raw and not zh:
-        return ""
-    who = str(item.get("quoted_account") or "").strip()
-    body = zh or raw
-    return (f"【引用 @{who}】\n{body}" if who else f"【引用】\n{body}")
-
-
-def body_text(item: dict) -> str:
-    """正文（AI 标题 + 来源行 + 译文 + 转发评论 + 被引用内容）。"""
-    title = str(item.get("ai_title") or "").strip()
-    src = build_source_line(item)
-    body = str(item.get("zh") or item.get("raw") or "").strip()
-    text = "\n\n".join(part for part in (title, src, body) if part)
-    fl = forward_line(item)
-    if fl:
-        text += "\n\n" + fl
-    qt = quoted_text(item)
-    if qt:
-        text += "\n\n" + qt
-    return text
+def body_text(item):
+    """直接排版已经整合引用和转发正文的完整译文。"""
+    return "\n\n".join(str(p).strip() for p in (item.get('ai_title'),build_source_line(item),item.get('zh')) if p)
 
 
 def item_images(item: dict) -> list:

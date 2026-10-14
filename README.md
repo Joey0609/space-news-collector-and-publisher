@@ -13,13 +13,13 @@
 | 路径 | 说明 |
 |---|---|
 | `collect/` | 数据收集：X 增量采集、图片、源适配器；入口 `collect/news_fetch.py` |
-| `process/` | 数据处理：`translate.py`、`judge.py`、`ai_fallback.py`，输出到 `data/work/` 与队列 |
+| `process/` | 数据处理：`analyze_db.py` 一次生成完整归档、最终操作码和无效原因，直接写入 SQLite |
 | `distribute/maibot/` | MaiBot 插件，部署时把 `hangxiaomai_news/` 拷入 MaiBot 的 `plugins/` |
 | `distribute/alison/` | QQ 官方机器人艾莉森：图文转述、网关、诊断脚本 |
 | `distribute/napcat/` | NapCat OneBot11 联调发送端 |
 | `hx_common/` | 共享路径、契约、SQLite 台账、Markdown 导出 |
 | `data/` | 运行期数据：raw/work/images/queue/state/markdown/hx.sqlite3，不入库 |
-| `config_templates/` | 推送默认 / 评分规则 / 功能开关模板 |
+| `config_templates/` | 推送默认 / 功能开关模板 |
 | `dashboard/` | 本机可视化看板：队列、状态、日志、运行控制；默认 `127.0.0.1:8787` |
 | `selftest/` | 离线冒烟测试：`run_all.py` 一键跑 |
 | `AGENTS.md` | **AI 启动必读**：模块地图 / 数据契约 / 硬规则 / 看板 / 已知坑 |
@@ -32,11 +32,11 @@
    它会启动 `dashboard/server.py`、等端口起来、**自动打开 `http://127.0.0.1:8787`**；服务已在跑时只开页面。
    `run_dashboard.vbs` 是同一件事的静默版（可放启动项/计划任务）。采集与处理服务在看板页面上按「启动」即可。
    也可以手动跑：`python dashboard/server.py`。
-4. **单独跑流程**：`python main_flow.py`（一轮采集→翻译→判定→兜底）；采集 `python collect/news_fetch.py`；
-   处理 `python process/translate_db.py`（翻译 + 四盏灯 + AI 分 + 标签/要点，并自动补老条目）、`python process/judge.py`、`python process/ai_fallback.py`。
+4. **单独跑流程**：`python main_flow.py`（一轮采集→完整 AI 分析）；采集 `python collect/news_fetch.py`；
+   处理 `.venv\Scripts\python.exe process/analyze_db.py`：一次 AI 请求返回完整内容、最终发/丢与无效原因，逐条提交后立即进入分发池。
 5. **安装插件**：把 `distribute/maibot/hangxiaomai_news/` 放进 MaiBot 的 `plugins/` 目录，并修改 `config.toml` 的 `target_qq` / `target_groups`。
 6. **艾莉森（可选）**：在 `distribute/alison/.env` 填 `APPID` / `SECRET`；先运行 `python distribute/alison/gateway.py` 记录 `group_openid`，再运行 `python distribute/alison/推送.py --once`。
-7. **迁移旧数据**：先 `python tools/migrate_layout.py --dry-run`，确认后 `--apply`；给数据库瘦身用 `python tools/drop_columns.py --dry-run`。
+7. **重建分析数据**：`tools/reset_analysis_data.py --apply` 会备份旧库并保留最新15条及随机15条；执行前关闭看板。新库不兼容旧分析字段。
 8. **改完代码先自检**：`python selftest/run_all.py`。
 
 ## 安全说明

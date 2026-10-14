@@ -22,7 +22,7 @@
     hx_llm.py       直连模型 API（文案/翻译/解析）+ 读麦麦人设
     hx_render.py    来源行、正文、转发评论、图片 base64
     hx_send.py      SendMixin：stream_id 解析 + 底层发送
-    hx_fallback.py  FallbackMixin：每日首推 / 留档旧闻 / 无内容闲聊
+    hx_fallback.py  FallbackMixin：每日首推 / 无内容闲聊
     hx_schedule.py  ScheduleMixin：受控节奏调度（本插件核心判断）
     hx_prefs.py     自然语言改推送设置/内容偏好
 
@@ -218,7 +218,7 @@ class HangxiaomaiNewsPlugin(ConfigMixin, SendMixin, FallbackMixin, ScheduleMixin
                     await self._send_text(sid, hint)
                 return {"action": "abort"}
 
-            sections = {k: parsed.get(k) for k in ("schedule", "scoring", "preference")
+            sections = {k: parsed.get(k) for k in ("schedule",)
                         if parsed.get(k)}
             if parsed.get("action") != "set" or not sections:
                 return continue_result

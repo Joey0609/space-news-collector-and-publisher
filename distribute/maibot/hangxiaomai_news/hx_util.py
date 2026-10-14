@@ -2,10 +2,9 @@
 """hx_util.py · 纯工具函数（不碰文件、不碰 ctx，随便复用）
 =====================================================
 - 列表归一化：把"配置里可能写成 str / list / 逗号串"的字段统一成 list[str]
-- 条目去重键：内容留档按 账号+内容 去重
 
 注意：私聊/各群"各发各的、互不占用"现在由 SQLite 的 `items.pushed` 负责
-（每个目标一个 source，见 hx_push_db.py），这里不再有 sent_to 标记。
+（每个目标一个 source，见 dashboard/channels.py），这里不再有 sent_to 标记。
 """
 from typing import Any
 
@@ -39,8 +38,3 @@ def as_bool(v: Any) -> bool:
     if isinstance(v, (int, float)):
         return bool(v)
     return str(v).strip().lower() in ("true", "1", "yes", "on")
-
-
-def dedup_key(item: dict) -> tuple:
-    """条目去重键：账号 + 中文译文（内容留档去重用）。"""
-    return str(item.get("account", "")), str(item.get("zh", ""))

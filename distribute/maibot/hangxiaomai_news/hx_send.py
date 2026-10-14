@@ -15,11 +15,11 @@ import asyncio
 if __package__ in (None, ""):
     from hx_llm import llm_text, maisaka_persona
     from hx_paths import MAX_IMG_PER_MSG
-    from hx_render import build_source_line, forward_line, img_to_base64, item_images
+    from hx_render import build_source_line, img_to_base64, item_images
 else:
     from .hx_llm import llm_text, maisaka_persona
     from .hx_paths import MAX_IMG_PER_MSG
-    from .hx_render import build_source_line, forward_line, img_to_base64, item_images
+    from .hx_render import build_source_line, img_to_base64, item_images
 
 
 class SendMixin:
@@ -163,9 +163,6 @@ class SendMixin:
         title = str(item.get("ai_title") or "").strip()
         source = build_source_line(item)
         text1 = "\n\n".join(part for part in (title, source, translation) if part)
-        fwd = forward_line(item, self.ctx.logger)
-        if fwd:
-            text1 += "\n\n" + fwd
         persona = maisaka_persona()
         prompt = (
             f"{persona}\n\n"

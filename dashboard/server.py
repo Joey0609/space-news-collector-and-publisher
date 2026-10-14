@@ -41,7 +41,7 @@ PROCESSES: dict[str, subprocess.Popen] = {}
 SERVICE_NAMES = {"collect": "采集", "process": "处理"}
 CONFIG_FIELDS = {
     "collect": ["PROXY_URL", "COOKIES_PATH", "SCAN_BATCH", "PAUSE_SECONDS", "COLLECT_INTERVAL_SECONDS", "WEB_COLLECT_INTERVAL_SECONDS", "SOURCES"],
-    "process": ["AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES", "TRANSLATE_RATE_LIMIT_WAIT", "TRANSLATE_PAUSE_SECONDS"],
+    "process": ["AI_REPEAT_CONTEXT", "ANALYSIS_MAX_ATTEMPTS", "ANALYSIS_INLINE_RETRIES", "ANALYSIS_RATE_LIMIT_WAIT", "ANALYSIS_PAUSE_SECONDS"],
 }
 CHANNEL_KEY_PREFIX = "channel:"
 WS_PORT = int(os.getenv("HX_WS_PORT", "") or 8788)
@@ -61,10 +61,10 @@ FIELD_DEFAULTS = {
     "MODEL_TIMEOUT": "90",
     "MODEL_MAX_TOKENS": "0",
     "AI_REPEAT_CONTEXT": "40",
-    "TRANSLATE_MAX_ATTEMPTS": "3",
-    "TRANSLATE_INLINE_RETRIES": "2",
-    "TRANSLATE_RATE_LIMIT_WAIT": "20",
-    "TRANSLATE_PAUSE_SECONDS": "0.5",
+    "ANALYSIS_MAX_ATTEMPTS": "3",
+    "ANALYSIS_INLINE_RETRIES": "2",
+    "ANALYSIS_RATE_LIMIT_WAIT": "20",
+    "ANALYSIS_PAUSE_SECONDS": "0.5",
 }
 
 
@@ -190,8 +190,8 @@ def save_service_config(name: str, updates: dict) -> None:
                     number = float(text)
                     if not math.isfinite(number) or number < 0:
                         raise ValueError()
-                    if key in {"AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES"}:
-                        if int(text) < (1 if key == "TRANSLATE_MAX_ATTEMPTS" else 0):
+                    if key in {"AI_REPEAT_CONTEXT", "ANALYSIS_MAX_ATTEMPTS", "ANALYSIS_INLINE_RETRIES"}:
+                        if int(text) < (1 if key == "ANALYSIS_MAX_ATTEMPTS" else 0):
                             raise ValueError()
                 except ValueError as exc:
                     raise ValueError("处理参数必须是有效的非负数；次数和条数必须为整数，最大处理尝试次数至少为 1") from exc
@@ -243,7 +243,7 @@ def save_ai_config(payload: dict, use=False) -> dict:
 
 
 ITEM_SEARCH_FIELDS = ("raw", "zh", "ai_title", "ai_summary", "quoted_raw", "quoted_zh",
-                      "account", "orig_account", "quoted_account", "forward_comment", "ai_tags", "reason", "ori_url")
+                      "account", "orig_account", "quoted_account", "forward_comment", "ai_tags", "invalid_reason", "ori_url")
 ITEM_SORTS = {
     "published": "COALESCE(ts,0) DESC, id DESC",
     "collected": "(collected_at IS NOT NULL AND collected_at <> '') DESC, collected_at DESC, id DESC",
@@ -260,8 +260,8 @@ def all_items(offset: int = 0, limit: int = 20, query: str = "", sort: str = "pu
 def changed_items(since_id: int = 0, since_rev: int = 0, limit: int = 300) -> list[dict]:
     """变了的东西：新条目（id 更大）或被更新过的老条目（rev 更大）。
 
-    翻译是**就地更新**已有行，id 不变，所以只看 id 会漏掉"译文/四盏灯刚写好"这类变化；
-    rev 由各写入方（translate_db / judge / ai_fallback / 看板改译文）每次 +1。
+    翻译是**就地更新**已有行，id 不变，所以只看 id 会漏掉"完整分析刚提交"这类变化；
+    rev 由各写入方（analyze_db / 看板改译文）每次 +1。
     """
     if since_id <= 0 and since_rev <= 0:
         return []
@@ -307,9 +307,9 @@ def _item_rows(where_sql: str, tail_sql: str, params: tuple, *, search: str = ""
         row["ori_url"] = row.get("ori_url") or ""
         row["images"] = [str(p) for p in (row.get("images") or []) if str(p).strip()]
         row["_stage"] = row.get("stage", "")
-        # 分数在库里分两列（ai_score / rules_score），给前端一个算好的 score 省得两边各写一份逻辑
+        # 分数统一取自 AI 完整分析
         score = row.get("ai_score")
-        row["score"] = score if score is not None else row.get("rules_score")
+        row["score"] = score
     return rows
 
 
@@ -372,7 +372,7 @@ def services() -> dict:
 
 def _max_process_attempts() -> int:
     try:
-        return max(1, int(env_values().get("TRANSLATE_MAX_ATTEMPTS", "3")))
+        return max(1, int(env_values().get("ANALYSIS_MAX_ATTEMPTS", "3")))
     except (TypeError, ValueError):
         return 3
 
@@ -394,20 +394,7 @@ def process_backlog(include_items: bool = True) -> dict:
     try:
         conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
-        required = {"id", "raw", "zh", "stage", "translate_attempts", "translate_error",
-                    "is_news", "not_repeat", "not_comment", "not_sensitive", "ai_score",
-                    "ai_tags", "ai_title", "ai_summary", "importance", "quoted_raw", "quoted_zh"}
-        if not required <= columns:
-            conn.close()
-            return {"items": [], "remaining_count": 0, "ready_count": 0, "stuck_count": 0}
-        rows = conn.execute(
-            "SELECT id, origin_id, account, raw, zh, stage, ai_title, ai_score, ai_tags, "
-            "ai_summary, importance, quoted_raw, quoted_zh, is_news, not_repeat, not_comment, "
-            "not_sensitive, translate_attempts, translate_error, ts "
-            "FROM items WHERE raw IS NOT NULL AND TRIM(raw) <> '' "
-            " ORDER BY COALESCE(ts, 0) DESC, id DESC",
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM items WHERE raw IS NOT NULL AND TRIM(raw)<>'' ORDER BY COALESCE(ts,0) DESC,id DESC").fetchall()
         conn.close()
     except Exception as exc:
         print(f"[看板] 处理队列读取失败: {exc}", flush=True)
@@ -424,7 +411,7 @@ def process_backlog(include_items: bool = True) -> dict:
         missing = missing_analysis_fields(item)
         if not missing:
             missing.append("流程阶段")
-        attempts = int(item.get("translate_attempts") or 0)
+        attempts = int(item.get("analysis_attempts") or 0)
         stuck = False
         ready_count += 1
         items.append({
@@ -432,9 +419,9 @@ def process_backlog(include_items: bool = True) -> dict:
             "account": item.get("account") or "未知账号",
             "title": str(item.get("ai_title") or "").strip(),
             "raw": str(item.get("raw") or "")[:240],
-            "stage": item.get("stage") or "", "phase": "待完整分析" if missing[0] != "流程阶段" else "待进入判定",
+            "stage": item.get("stage") or "", "phase": "待完整分析" if missing[0] != "流程阶段" else "待完整分析",
             "missing": missing, "attempts": attempts, "max_attempts": max_attempts,
-            "stuck": stuck, "error": str(item.get("translate_error") or "")[:240],
+            "stuck": stuck, "error": str(item.get("analysis_error") or "")[:240],
         })
 
     return {"items": items, "remaining_count": len(items),
@@ -678,7 +665,7 @@ def _kill_tree(process) -> str:
     """把整棵子进程树杀掉，返回用于日志的说明。
 
     为什么不能只 process.terminate()：service_runner.py 只是"循环壳"，
-    它下面还有 main_flow.py，main_flow 下面还有 translate_db.py / judge.py / ai_fallback.py
+    它下面还有 main_flow.py，main_flow 下面还有 analyze_db.py
     这些孙子进程。Windows 上 terminate() 只结束直接子进程（TerminateProcess 不递归），
     于是壳死了、正在跑的那一轮处理照旧跑完 —— 看板显示"已停止"但模型请求还在继续。
     所以这里在 Windows 上用 taskkill /T 杀整棵树；taskkill 被拒时至少退回 terminate()。
@@ -762,24 +749,33 @@ def toggle_channel(channel_id: str, enabled: bool) -> dict:
 
 
 def update_item(payload: dict) -> None:
-    """看板手改条目（目前只允许改这几列；改译文后顺手清掉旧错误信息）。"""
-    item_id = int(payload.get("id"))
-    allowed = {"zh", "raw", "decision", "reason", "content_type", "ori_url"}
-    values = {key: payload[key] for key in allowed if key in payload}
-    if not values:
-        raise ValueError("没有可修改字段")
-    conn = sqlite3.connect(DATA / "hx.sqlite3")
+    """修改原文需重新分析；人工编辑结果也必须符合完整输出契约。"""
+    item_id = int(payload.get('id'))
+    allowed = {'zh','raw','decision','invalid_reason','content_type','ori_url'}
+    values = {key:payload[key] for key in allowed if key in payload}
+    if not values: raise ValueError('没有可修改字段')
+    conn = sqlite3.connect(DATA/'hx.sqlite3')
+    conn.row_factory = sqlite3.Row
     try:
-        sets = ",".join(f"{key}=?" for key in values)
-        # 手改译文后清掉旧错误：留着它会被当成"还没翻译好"，下轮把人工改的覆盖掉
-        extra = ", translate_error=''" if "zh" in values else ""
-        conn.execute(
-            f"UPDATE items SET {sets}, processed_at=?, rev=COALESCE(rev,0)+1{extra} WHERE id=?",
-            list(values.values()) + [time.strftime("%Y-%m-%dT%H:%M:%S"), item_id])
+        current = conn.execute('SELECT * FROM items WHERE id=?',(item_id,)).fetchone()
+        if current is None: raise ValueError('内容不存在')
+        changed_raw = 'raw' in values and values['raw'] != current['raw']
+        if changed_raw:
+            values.update(zh='',quoted_zh='',ai_title='',ai_summary='',importance='',ai_tags='',ai_score=None,repeat_of='',decision=None,invalid_reason='',stage='collected',analysis_attempts=0,analysis_error='',processed_at=None)
+        else:
+            candidate = dict(current);candidate.update(values)
+            if candidate.get('stage') == 'processed' and missing_analysis_fields(candidate):
+                raise ValueError('修改后的内容不符合完整分析契约')
+            if 'zh' in values: values['analysis_error']=''
+        sets=','.join(f'{key}=?' for key in values)
+        conn.execute(f'UPDATE items SET {sets},rev=rev+1 WHERE id=?',[*values.values(),item_id])
+        if changed_raw:
+            from collect.db import enqueue_processing_event
+            enqueue_processing_event(conn,item_id)
         conn.commit()
     finally:
         conn.close()
-    audit("item_update", {"id": item_id, "fields": sorted(values)})
+    audit('item_update',{'id':item_id,'fields':sorted(values)})
 
 
 class Handler(BaseHTTPRequestHandler):

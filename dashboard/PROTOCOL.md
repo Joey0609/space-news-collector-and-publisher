@@ -21,10 +21,10 @@
 看板启动处理服务时先对 SQLite 做一次全库完整性扫描，用来恢复服务停止期间积累的记录。启动扫描结束后，处理服务不再周期性重扫 `items`：
 
 1. `collect.db.upsert_raw()` 在同一事务中写入新增/变化的原文，并发布到 `processing_events`。
-2. 处理服务等待到期事件，按事件里的 `item_id` 调用完整处理链；不会把全库查询作为后续增量入口。
+2. 处理服务等待到期事件，按事件里的 `item_id` 调用一次完整 AI 分析；不会把全库查询作为后续增量入口。
 3. 成功完成的事件确认后删除；失败条目保留事件并移到队尾，没有累计重试上限。
 4. 事件按 item 合并并带 generation，处理过程中同一条内容再次变化时，新一代事件不会被旧处理结果确认掉。
-5. `TRANSLATE_MAX_ATTEMPTS` 是单条每次轮到时最多完整分析几次；仍失败先处理后续内容，队尾轮回来继续尝试。超时与格式错误都不永久放弃；失败项移到队尾时设置 `TRANSLATE_RATE_LIMIT_WAIT` 秒冷却（至少 1 秒），期间先处理其他到期事件。启动时找回旧版本因累计上限漏掉的事件，保留累计次数。
+5. `ANALYSIS_MAX_ATTEMPTS` 是单条每次轮到时最多完整分析几次；仍失败先处理后续内容，队尾轮回来继续尝试。超时与格式错误都不永久放弃；失败项移到队尾时设置 `ANALYSIS_RATE_LIMIT_WAIT` 秒冷却（至少 1 秒），期间先处理其他到期事件。启动时恢复尚未完成的事件，保留累计次数。
 
 `processing_events` 是持久订阅队列，因此处理服务重启时可以通过启动全库扫描恢复；在运行期间，新采集内容走事件增量。
 
@@ -72,7 +72,7 @@
 `item` 里的字段（与旧队列 JSON 兼容，渲染代码不用改）：
 `id` `platform` `source` `account` `orig_account` `forward_comment` `quoted_account`
 `quoted_raw` `quoted_zh` `quoted_url` `ts` `date` `content_type` `raw` `zh` `images[]`
-`ori_url` `score`（= `ai_score` 有值就用，否则 `rules_score`）`ai_title` `ai_summary`
+`ori_url` `score`（= `ai_score`）`ai_title` `ai_summary` `decision` `invalid_reason`
 `importance` `ai_tags` `decision` `pushed{}`。
 
 ### 1.3 推送规则（服务端）
@@ -177,7 +177,7 @@ QQ 官方文档只提供[按 OpenID 获取指定群信息](https://bot.q.qq.com/
   - 下面内容列表**占满 100% 宽度**（原来的右侧 OVERVIEW 栏取消，摘要已在上面）。
 - **分发** tab：渠道卡片（状态徽标、targets、待发、累计发送、最近活动、`启动/停止`、`配置`），
   下面"最近分发记录"表（`/api/pushes`）。
-- 详情 / 配置两个 `<dialog>` 保留原有交互（含 `i` 图标 tooltip、四盏灯、筛选、分页）。
+- 详情 / 配置两个 `<dialog>` 保留原有交互（含 `i` 图标 tooltip、最终判定与无效原因、筛选、分页）。
 
 处理服务的配置入口分为 **AI 配置** 和 **处理配置**，分别打开独立弹窗。处理配置保留左右两栏字段；AI 配置左侧卡片点击仅切换编辑对象，左侧「使用此接入点」按钮才切换实际使用项。保存 AI 配置不隐式切换使用项，当前使用项禁止删除。
 

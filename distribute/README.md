@@ -71,3 +71,5 @@ pushes                                 ← 每次成功发送的审计（source/
    `ws://127.0.0.1:8788/ws?token=<看板 token>`，`run_forever(on_item)` 里实现"发一条"，
    返回 `{"ok": True}` / `{"ok": False, "detail": ...}` / `{"defer": 秒数, "reason": ...}`。
 3. 跑 `python selftest\run_all.py`（`check_channels.py` 覆盖注册/推送/拉取/回执/写库）。
+
+内容处理直接使用单次 AI 分析的 decision，不再读取四灯或规则分，也不导入旧JSON队列。

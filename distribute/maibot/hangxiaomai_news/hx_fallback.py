@@ -1,30 +1,27 @@
 # -*- coding: utf-8 -*-
 """hx_fallback.py · FallbackMixin —— "没有合适内容时发什么" + 每日首推
 ==================================================================
-三类兜底（都按目标 kind 各自独立执行、各自计时）：
+两类调度（都按目标 kind 各自独立执行、各自计时）：
     1) 每日首推：某目标"静默→活跃"的那一刻，向看板要最多 10 条（按分数取前 10）
        合成一张"总结卡"发出，再逐条回报结果
-    2) 留档兜底：没有待发内容但 内容留档.json 有旧内容 → 发一条旧闻
-    3) 闲聊兜底：既没新内容也没旧内容，连续 3 轮空 → 用麦麦人设随口说一句（受"闲聊"开关控制）
+    2) 闲聊：没有待发内容，连续 3 轮空 → 用麦麦人设随口说一句（受"闲聊"开关控制）
 """
 import asyncio
 
 if __package__ in (None, ""):
     from hx_llm import llm_text, maisaka_persona
-    from hx_render import build_source_line, forward_line, item_images
+    from hx_render import build_source_line, item_images
     from hx_schedule import source_of
     from hx_state import record_daily_push, save_field
-    from hx_store import load_archive, save_archive
 else:
     from .hx_llm import llm_text, maisaka_persona
-    from .hx_render import build_source_line, forward_line, item_images
+    from .hx_render import build_source_line, item_images
     from .hx_schedule import source_of
     from .hx_state import record_daily_push, save_field
-    from .hx_store import load_archive, save_archive
 
 
 class FallbackMixin:
-    """每日首推 / 留档旧闻 / 无内容闲聊。依赖 self.config / self.ctx 与调度状态。"""
+    """每日首推 / 无内容闲聊。依赖 self.config / self.ctx 与调度状态。"""
 
     async def _do_daily_first_push(self, state_file, now: float, target: dict) -> bool:
         """单个目标的每日首推：向看板要最多 10 条 → 按分数取前 10 → 合成一条批量卡发出。
@@ -72,9 +69,6 @@ class FallbackMixin:
             src = build_source_line(it)
             body = str(it.get("zh") or it.get("raw") or "").strip()
             line = "\n".join(part for part in (title, src, body) if part)
-            fl = forward_line(it, self.ctx.logger)
-            if fl:
-                line += "\n" + fl
             lines.append(line)
         card_text = opening + "\n\n" + "\n———\n".join(lines)
 
@@ -106,18 +100,8 @@ class FallbackMixin:
                 self.ctx.logger.warning(f"每日首推发送失败: {e}")
         return sent
 
-    async def _send_one_archive_to(self, t: dict) -> bool:
-        """取一条留档旧闻（队首），按该目标的带图设置发给它。"""
-        archive = load_archive()
-        if not archive:
-            return False
-        item = archive.pop(0)
-        save_archive(archive)
-        with_img = self._bool_setting(t["settings"], "带图", True)
-        return await self._speak_news(t["stream_id"], item, with_img)
-
     async def _send_casual_to(self, t: dict) -> bool:
-        """没新内容也没旧闻时，用麦麦人设生成一句闲聊发给这个目标。"""
+        """没有待发内容时，用麦麦人设生成一句闲聊发给这个目标。"""
         persona = maisaka_persona()
         prompt = (
             f"{persona}\n\n"

@@ -118,7 +118,6 @@ case = REPO / "selftest" / ".sandbox" / "alison_case"
 shutil.rmtree(case, ignore_errors=True)
 case.mkdir(parents=True, exist_ok=True)
 old_env = config_env.ENV_FILE
-old_state = groups.STATE_FILE
 old_env_state = config_env.STATE_FILE
 old_db = groups.DB_FILE
 old_config_db = alison_config.DB_FILE
@@ -127,19 +126,15 @@ old_token = config_qq.get_token
 old_interval = alison_config.INFO_INTERVAL
 try:
     config_env.ENV_FILE = case / ".env"
-    groups.STATE_FILE = case / "state.json"
     config_env.STATE_FILE = case / "state.json"
     groups.DB_FILE = case / "hx.sqlite3"
     alison_config.DB_FILE = groups.DB_FILE
     alison_config.INFO_INTERVAL = 0
-    groups.STATE_FILE.write_text(json.dumps({"group_openid": "LEGACY"}), encoding="utf-8")
 
     initial = alison_config.config()
     check("配置提示明确区分沙箱与正式机器人",
           "沙箱与正式机器人" in initial["discovery_note"])
-    check("旧 state.json 已知群只补录一次且默认关闭推送",
-          [row["group_openid"] for row in initial["groups"]] == ["LEGACY"]
-          and initial["groups"][0]["push_enabled"] is False, initial["groups"])
+    check("群目录不读取旧 state.json",initial["groups"]==[],initial["groups"])
     result = alison_config.save({"APPID": "demo-id", "SECRET": "demo-secret",
                                  "SANDBOX": "true", "ALISON_WITH_IMAGE": False,
                                  "ALISON_DISCOVER_GROUPS": True})
@@ -245,7 +240,7 @@ try:
     while alison_config.config()["refresh"]["running"] and time.time() < deadline:
         time.sleep(.02)
     status = alison_config.config()
-    check("只显式点击刷新才向 QQ 查已知群信息", status["refresh"]["done"] == 3
+    check("只显式点击刷新才向 QQ 查已知群信息", status["refresh"]["done"] == 2
           and status["refresh"]["error"] == 0 and not status["refresh"]["running"],
           status["refresh"])
     refreshed = groups.get_group("GROUP_B")
@@ -261,7 +256,7 @@ try:
         time.sleep(.02)
     failed_refresh = alison_config.config()["refresh"]
     check("官方群信息接口无白名单权限时标注失败，群开关不被关闭",
-          failed_refresh["error"] == 3 and groups.get_group("GROUP_A")["push_enabled"]
+          failed_refresh["error"] == 2 and groups.get_group("GROUP_A")["push_enabled"]
           and groups.get_group("GROUP_A")["last_error"] != "", failed_refresh)
     try:
         alison_config.add_group("https://unsafe/abc")
@@ -442,7 +437,6 @@ try:
           and not groups.get_group("JOINED")["push_enabled"])
 finally:
     config_env.ENV_FILE = old_env
-    groups.STATE_FILE = old_state
     config_env.STATE_FILE = old_env_state
     groups.DB_FILE = old_db
     alison_config.DB_FILE = old_config_db

@@ -31,11 +31,11 @@ const hints = {
   MODEL_API_KEY: "模型 API Key，不会回显。",
   MODEL_TIMEOUT: "单次请求超时秒数。",
   MODEL_MAX_TOKENS: "单次输出上限；0 = 不显式限制（交给服务端默认）。译文+标签是 JSON，上限太小会被截断。",
-  AI_REPEAT_CONTEXT: "判「不重复」那盏灯时，给模型对比的最近已入库标题条数；0 = 不给清单（只看文本里的旧闻线索）。",
-  TRANSLATE_MAX_ATTEMPTS: "每次轮到一条内容时最多完整分析几次；仍失败就移到队尾，下次轮到继续，没有累计重试上限。",
-  TRANSLATE_INLINE_RETRIES: "遇到限流/超时时，同一轮内当场重试几次。",
-  TRANSLATE_RATE_LIMIT_WAIT: "限流/超时后等待多少秒再重试。",
-  TRANSLATE_PAUSE_SECONDS: "每条内容处理完成后的等待秒数，0 表示不主动等待。",
+  AI_REPEAT_CONTEXT: "判定内容重复时，给模型对比的最近已入库标题条数；0 = 不给清单（只看文本里的旧闻线索）。",
+  ANALYSIS_MAX_ATTEMPTS: "每次轮到一条内容时最多完整分析几次；仍失败就移到队尾，下次轮到继续，没有累计重试上限。",
+  ANALYSIS_INLINE_RETRIES: "遇到限流/超时时，同一轮内当场重试几次。",
+  ANALYSIS_RATE_LIMIT_WAIT: "限流/超时后等待多少秒再重试。",
+  ANALYSIS_PAUSE_SECONDS: "每条内容处理完成后的等待秒数，0 表示不主动等待。",
 };
 
 const protocolLabels = {
@@ -233,77 +233,18 @@ function tagsOf(item) {
   }
 }
 
-/* is_news：1=新闻 0=非新闻 空=模型没判出来 */
-function newsLabel(item) {
-  if (item.is_news === 0 || item.is_news === "0") return "非新闻";
-  if (item.is_news === 1 || item.is_news === "1") return "新闻";
-  return "";
-}
-
 /* importance：高/中/低 */
 function importanceLabel(item) {
   const value = String(item.importance || "").trim();
   return ["高", "中", "低"].includes(value) ? `重要度 ${value}` : "";
 }
 
-/* 四盏灯：是新闻 / 不重复 / 非评价 / 非敏感政治。1=绿 0=红 空=灰（还没点灯） */
-const LIGHTS = [
-  { key: "is_news", label: "是新闻", on: "是航天新闻/公告/任务进展", off: "闲聊、日常、广告、抽奖、无实质信息" },
-  { key: "not_repeat", label: "不重复", on: "不是重复内容", off: "旧闻回顾，或与已入库清单里某条是同一件事" },
-  { key: "not_comment", label: "非评价", on: "它自己就是内容（原发/官方/独立消息）", off: "对另一条新闻的吐槽、跟评、转发加感想" },
-  { key: "not_sensitive", label: "非敏感政治", on: "不涉及敏感政治与外交", off: "涉政外交、战争军演、政客表态等红线" },
-];
-
-function lightValue(item, key) {
-  const raw = item[key];
-  if (raw === true || raw === 1 || raw === "1") return true;
-  if (raw === false || raw === 0 || raw === "0") return false;
-  return null;
-}
-
-function lightStateOf(item) {
-  const values = LIGHTS.map((light) => lightValue(item, light.key));
-  if (values.some((value) => value === false)) return "red";
-  if (values.every((value) => value === true)) return "green";
-  return "unknown";
-}
-
-/* 悬停立刻显示的提示文案（原生 title 有一秒延迟，所以自己画 tooltip） */
-function lightTip(light, value) {
-  if (value === true) return `${light.label}：绿 ✓ ${light.on}`;
-  if (value === false) return `${light.label}：红 ✕ ${light.off}`;
-  return `${light.label}：灰 — 还没点灯（判定时按老规则走）`;
-}
-
-function lightsHtml(item) {
-  return LIGHTS.map((light) => {
-    const value = lightValue(item, light.key);
-    const cls = value === true ? "on" : value === false ? "off" : "unknown";
-    const tip = lightTip(light, value);
-    return `<i class="light light-${cls}" data-tip="${esc(tip)}" aria-label="${esc(tip)}"></i>`;
-  }).join("");
-}
-
-function lightText(item) {
-  const values = LIGHTS.map((light) => lightValue(item, light.key));
-  if (values.every((value) => value === null)) return "";
-  const state = lightStateOf(item);
-  if (state === "green") return "全绿";
-  if (state === "red") {
-    const reds = LIGHTS.filter((light) => lightValue(item, light.key) === false)
-      .map((light) => light.label);
-    return `红灯：${reds.join("、")}`;
-  }
-  return "未点齐";
-}
-
 /* 台账筛选 */
 const FILTERS = {
   all: () => true,
-  green: (item) => lightStateOf(item) === "green",
-  red: (item) => lightStateOf(item) === "red",
-  unknown: (item) => lightStateOf(item) === "unknown",
-  send: (item) => item.stage === "processed" && item.decision === "发",
+  valid: (item) => item.stage === "processed" && item.decision === "发",
+  invalid: (item) => item.stage === "processed" && item.decision === "丢",
+  pending: (item) => item.stage !== "processed",
 };
 let itemFilter = "all";
 
@@ -325,26 +266,16 @@ function chip(text, className = "") {
   return `<span class="chip ${className}">${esc(text)}</span>`;
 }
 
-/* 分数：优先显示 AI 价值分（0~100），没有就退回规则加权分 */
+/* AI 完整分析的价值分 */
 function scoreOf(item) {
-  const ai = item.ai_score;
-  if (ai !== null && ai !== undefined && ai !== "" && !Number.isNaN(Number(ai))) {
-    return { value: Number(ai), label: "AI 分" };
-  }
-  const fallback = (item.rules_score !== null && item.rules_score !== undefined
-      && item.rules_score !== "") ? item.rules_score : item.score;
-  if (fallback === null || fallback === undefined || fallback === ""
-      || Number.isNaN(Number(fallback))) {
-    return null;
-  }
-  return { value: Number(fallback), label: "规则分" };
+  const score = item.ai_score;
+  return score === null || score === undefined || score === "" || Number.isNaN(Number(score))
+    ? null : { value: Number(score), label: "AI 分" };
 }
 
 /* 一条内容的判定/分数/重要度/标签小圆片 */
 function chipRow(item) {
-  const parts = [];
-  const news = newsLabel(item);
-  if (news) parts.push(chip(news, news === "非新闻" ? "chip-warn" : "chip-news"));
+  const parts = [chip(item.stage === "processed" ? `判定：${item.decision}` : "待分析")];
   const score = scoreOf(item);
   if (score) parts.push(chip(`${score.label} ${score.value}`, "chip-score"));
   const importance = importanceLabel(item);
@@ -408,11 +339,11 @@ function buildItem(item) {
   element.dataset.key = keyOf(item);
   const title = String(item.ai_title || "").trim();
   const chipHtml = chipRow(item);
-  const lightHtml = lightsHtml(item);
   element.innerHTML = `
       <div class="item-main">
-        <b><span class="lights">${lightHtml}</span> ${esc(item.account || "未知账号")} · ${esc(item.content_type || "内容")}</b>
+        <b>${esc(item.account || "未知账号")} · ${esc(item.content_type || "内容")}</b>
         ${title ? `<div class="item-title">${esc(title)}</div>` : ""}
+        ${item.invalid_reason ? `<div class="invalid-reason">无效原因：${esc(item.invalid_reason)}</div>` : ""}
         <div class="item-preview">${esc(item.zh || item.raw || "")}</div>
         ${chipHtml ? `<div class="chips">${chipHtml}</div>` : ""}
         <div class="item-provenance">
@@ -880,7 +811,7 @@ function appendItems(items) {
   box.append(fragment);
 }
 
-/* 实时补丁：新条目插到最前，被更新过的（译文/四盏灯/判定刚写好）就地刷新。 */
+/* 实时补丁：新条目插到最前，被更新过的（完整分析刚提交）就地刷新。 */
 function upsertItems(items) {
   const box = $("#items");
   const added = [];
@@ -1093,11 +1024,9 @@ function openDetail(key) {
     formatDate(item.date),
     item.stage || item._stage,
     scoreOf(item) ? `${scoreOf(item).label} ${scoreOf(item).value}` : "分数 —",
-    item.rules_score !== null && item.rules_score !== undefined ? `规则分 ${item.rules_score}` : "",
+
     item.decision,
-    item.reason,
-    lightText(item),
-    newsLabel(item),
+    item.invalid_reason ? `无效原因：${item.invalid_reason}` : "",
     importanceLabel(item),
     ...tagsOf(item),
   ].filter(Boolean);
@@ -1109,7 +1038,7 @@ function openDetail(key) {
   summaryBox.textContent = summary ? `AI 要点：${summary}` : "";
   summaryBox.hidden = !summary;
 
-  // 引用（quote）：被引用那条的正文/译文 + 链接。有引用的条目第 3 盏灯会被强制放行，
+  // 引用（quote）：被引用那条的正文/译文 + 链接。有引用的条目由 AI 与主帖一起分析，
   // 所以这里也标一句，能看到"为什么这条没被判成评价"。
   const quotedBox = $("#detail-quoted");
   const quotedRaw = String(item.quoted_raw || "").trim();
@@ -1117,7 +1046,7 @@ function openDetail(key) {
   if (quotedRaw || quotedZh) {
     const who = String(item.quoted_account || "").trim();
     const url = String(item.quoted_url || "").trim();
-    const head = `引用了 @${who || "?"}（第 3 盏灯自动放行）`;
+    const head = `引用了 @${who || "?"}`;
     const link = url ? ` ${url}` : "";
     quotedBox.textContent = `${head}${link}\n${quotedZh || quotedRaw}`;
     quotedBox.hidden = false;
@@ -1292,9 +1221,9 @@ async function saveConfig() {
 
 /* AI 接入点：编辑对象与使用对象独立；只有左侧“使用此接入点”才提交切换。 */
 const PROCESS_LABELS = {
-  AI_REPEAT_CONTEXT: "去重参考条数", TRANSLATE_MAX_ATTEMPTS: "单条每轮尝试次数",
-  TRANSLATE_INLINE_RETRIES: "单次请求重试次数", TRANSLATE_RATE_LIMIT_WAIT: "限流等待（秒）",
-  TRANSLATE_PAUSE_SECONDS: "处理间隔（秒）",
+  AI_REPEAT_CONTEXT: "去重参考条数", ANALYSIS_MAX_ATTEMPTS: "单条每轮尝试次数",
+  ANALYSIS_INLINE_RETRIES: "单次请求重试次数", ANALYSIS_RATE_LIMIT_WAIT: "限流等待（秒）",
+  ANALYSIS_PAUSE_SECONDS: "处理间隔（秒）",
 };
 const AI_LABELS = {
   name: "接入点名称", MODEL_PROTOCOL: "接口协议", MODEL_API_BASE: "API 地址",

@@ -2,7 +2,7 @@
 """航小麦 · 主流程 (模块5 · main_flow.py)
 =======================================
 作用：把整条推送线串起来：
-      模块1(增量抓取) → 模块2(打标打分) → 模块3(AI兜底)
+      增量采集 → 一次完整 AI 分析 → 最终结果逐条入库
       → 判定"发"的结果原地留在 SQLite（items.decision）
       → 分发端（麦麦插件 / 艾莉森）直接读库取自己还没发过的条目推送。
 
@@ -35,30 +35,10 @@ for _path in (_REPO, _COLLECT_DIR):
 from collect.jsonio import latest_file
 from collect.logging_util import make_log, setup_console_encoding
 from collect.paths import LOG_DIR, RAW_DIR, WORK_DIR, ROOT  # noqa: F401
-from distribute.push_db import (
-    describe as queue_describe,
-    pending as queue_pending,
-    pending_count as queue_pending_count,
-)
 OUTPUT_DIR = RAW_DIR
 
 LOG_FILE = LOG_DIR / "main_flow.log"
 log = make_log(LOG_FILE)
-PROCESS_PROGRESS_FILE = ROOT / "data" / "state" / "process_progress.json"
-
-
-def write_processing_stage(phase: str, running: bool = True) -> None:
-    """Keep the dashboard phase current between translate, judge, and fallback modules."""
-    payload = {"running": bool(running), "phase": phase, "current": None,
-               "index": 0, "total": 0}
-    try:
-        PROCESS_PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        temporary = PROCESS_PROGRESS_FILE.with_suffix(".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, PROCESS_PROGRESS_FILE)
-    except OSError as exc:
-        log(f"[进度] 看板进度写入失败: {exc}")
-
 # Project-local interpreter is mandatory for the pipeline.
 PROJECT_PY = ROOT / ".venv" / "Scripts" / "python.exe"
 VENV_PY = PROJECT_PY if PROJECT_PY.is_file() else Path(sys.executable)
@@ -101,73 +81,12 @@ def run_module(script: str, *args: str) -> bool:
         return False
 
 
-def should_send_count() -> int:
-    """库里判定为"发"的条数。
-
-    分发端读的就是这些行（外加 items.pushed 里自己那个 source 还不是 true），
-    所以这里只统计、不再生成任何队列文件。
-    """
-    return len(queue_pending())
-
-
-def cleanup_old_outputs(keep: int = 3) -> None:
-    """清理旧输出文件（每类保留最近 keep 个），防 output/ 无限堆积。"""
-    for directory, pattern in ((RAW_DIR, "new_news_*.json"), (WORK_DIR, "judged_*.json"), (WORK_DIR, "fallback_*.json")):
-        for f in sorted(directory.glob(pattern))[:-keep]:
-            try:
-                f.unlink()
-            except Exception:
-                pass
-
-
 def run_processing(item_ids=None) -> bool:
-    """处理完整输入池，或逐条完成订阅项后立即公开到分发池。"""
-    if item_ids is not None:
-        ids = list(dict.fromkeys(int(value) for value in item_ids))
-        if not ids:
-            return True
-        failures = 0
-        for index, item_id in enumerate(ids, 1):
-            scoped_args = ["--item-ids", str(item_id)]
-            log(f"[订阅处理] 开始单条 {index}/{len(ids)}，item_id={item_id}")
-            stages = (
-                ("正在准备翻译和点灯", "translate_db.py"),
-                ("正在按四盏灯和规则判定", "judge.py"),
-                ("正在进行 AI 兜底判定", "ai_fallback.py"),
-            )
-            for phase, script in stages:
-                write_processing_stage(f"{phase}（{index}/{len(ids)}，item_id={item_id}）")
-                if not run_module(script, *scoped_args):
-                    failures += 1
-                    log(f"[订阅处理] item_id={item_id} 的 {script} 失败，继续处理后续条目")
-                    break
-            else:
-                log(f"[订阅处理] item_id={item_id} 完成，最终结果已提交并可供分发")
-        if failures:
-            log(f"[错误] {failures} 个单条处理阶段失败；其余条目已继续处理")
-            return False
-        log(f"[结果] 订阅增量逐条处理完成，共 {len(ids)} 条")
+    """一个分析程序处理整批输入，内部逐条提交最终结果。"""
+    if item_ids == []:
         return True
-
-    scoped_args = []
-    write_processing_stage("正在准备翻译和点灯")
-    success = True
-    try:
-        success = run_module("translate_db.py", *scoped_args) and success
-        write_processing_stage("正在按四盏灯和规则判定")
-        success = run_module("judge.py", *scoped_args) and success
-        write_processing_stage("正在进行 AI 兜底判定")
-        success = run_module("ai_fallback.py", *scoped_args) and success
-        if not success:
-            log("[错误] 处理阶段存在失败")
-            return False
-        if item_ids is None:
-            should = should_send_count()
-            log(f"[结果] 库里判定'发'共 {should} 条；{queue_describe()}")
-            log(f"[结果] 待分发 {queue_pending_count()} 条（分发端直接读库，不写队列文件）")
-            cleanup_old_outputs()
-    finally:
-        write_processing_stage("本轮处理结束", running=False)
+    args = [] if item_ids is None else ["--item-ids", ",".join(str(v) for v in dict.fromkeys(item_ids))]
+    return run_module("analyze_db.py", *args)
 
 
 def main() -> None:

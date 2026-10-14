@@ -123,8 +123,8 @@ def run_checks():
             assert request('/api/config/ai/use', {**saved, 'id': 'missing'})[0] == 400
             bad = {**saved, 'endpoints': [{**row, 'MODEL_TIMEOUT': 'nan'} for row in saved['endpoints']]}
             assert request('/api/config/ai', bad)[0] == 400
-            assert request('/api/config', {'service': 'process', 'values': {'TRANSLATE_MAX_ATTEMPTS': '0'}})[0] == 400
-            assert request('/api/config', {'service': 'process', 'values': {'TRANSLATE_PAUSE_SECONDS': '0'}})[0] == 200
+            assert request('/api/config', {'service': 'process', 'values': {'ANALYSIS_MAX_ATTEMPTS': '0'}})[0] == 400
+            assert request('/api/config', {'service': 'process', 'values': {'ANALYSIS_PAUSE_SECONDS': '0'}})[0] == 200
             assert 'secret' not in server.AUDIT.read_text(encoding='utf-8')
             fields = request('/api/config/process')[1]['data']['fields']
             assert len(fields) == 5 and not any(row['key'].startswith('MODEL_') for row in fields)

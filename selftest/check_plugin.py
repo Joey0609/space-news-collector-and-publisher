@@ -69,7 +69,7 @@ Plugin = plugin_mod.HangxiaomaiNewsPlugin
 for meth in ("_poll_loop", "_maybe_push", "_is_active_hours", "_next_random_interval",
              "_push_targets", "_resolve_stream_id", "_extract_stream_id", "_send_text_and_images",
              "_speak_news", "_send_text", "_do_daily_first_push", "_send_summary",
-             "_send_one_archive_to", "_send_casual_to", "_send_reminder_if_pending",
+              "_send_casual_to", "_send_reminder_if_pending",
              "_read_toml", "_effective_settings_for", "_bool_setting", "_user_pref_path",
              "_start_channel", "_target_label", "_channel_ready", "_channel_want",
              "_channel_pending", "_channel_result",
@@ -316,7 +316,7 @@ before = len(send.calls)
 asyncio.run(plugin._maybe_push(plugin_mod.STATE_FILE, 0.0))
 check("断线时不发也不回报", len(send.calls) == before and channel3.results == [])
 
-print("[4] 没有待发内容 + 有留档 → 发旧闻兜底")
+print("[4] 没有待发内容 → 不读取或发送遗留留档")
 channel4 = FakeChannelClient(targets=[{"kind": "private", "label": "私聊"},
                                       {"kind": "group_20002", "label": "群 20002"}])
 plugin._channel_client = channel4
@@ -330,8 +330,8 @@ for kind in ("private", "group_20002"):
 before = len(send.calls)
 asyncio.run(plugin._maybe_push(plugin_mod.STATE_FILE, 0.0))
 archive_now = json.loads((SANDBOX / "内容留档.json").read_text(encoding="utf-8"))
-check("留档被消费掉一条", len(archive_now) == 0, archive_now)
-check("兜底确实发了消息", len(send.calls) > before, (before, len(send.calls)))
+check("遗留留档保持原样", len(archive_now) == 1, archive_now)
+check("没有发送遗留旧闻", len(send.calls) == before, (before, len(send.calls)))
 
 print("[4b] 有内容但节奏没到点 → 不做兜底（别把旧闻插进来）")
 channel6 = FakeChannelClient(targets=[{"kind": "private", "label": "私聊"}])
@@ -362,8 +362,7 @@ check("总闸关闭时静默", len(send.calls) == before and channel5.results ==
 w(SANDBOX / "功能开关.toml", "新闻推送 = true\n")
 
 print("[6] 私聊自然语言改偏好（Hook）")
-fake_parsed = {"action": "set", "schedule": {"活跃时段": "12:00-23:00", "一次发几条": 2},
-               "scoring": {"高阈值": 30}, "preference": {"少发": ["猎鹰"]}}
+fake_parsed = {"action": "set", "schedule": {"活跃时段": "12:00-23:00", "一次发几条": 2}}
 
 
 async def fake_parse(text, context="", logger=None):
@@ -390,12 +389,6 @@ if push_pref.exists():
     txt = push_pref.read_text(encoding="utf-8")
     check("中文 key 带引号（TOML 必须）", '"活跃时段" = "12:00-23:00"' in txt, txt)
     check("数值字段写对", '"一次发几条" = 2' in txt, txt)
-scoring = SANDBOX / "推送规则_10001.toml"
-check("写下了 推送规则_10001.toml（阈值钳制）", scoring.exists()
-      and '"高阈值" = 30' in scoring.read_text(encoding="utf-8"))
-pref = SANDBOX / "偏好_10001.toml"
-check("写下了 偏好_10001.toml（少发→dislike）", pref.exists()
-      and "猎鹰" in pref.read_text(encoding="utf-8"))
 grp_res = asyncio.run(plugin.handle_push_pref(message={
     "processed_plain_text": "少发猎鹰",
     "session_id": "s_grp_20002",

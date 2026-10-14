@@ -10,8 +10,6 @@
     推送默认.toml              全局基线           [push]
     推送偏好_<QQ>.toml         某人的推送方式      [push]
     推送偏好_群<群号>.toml      某群的推送方式      [push]
-    推送规则.toml / 推送规则_<QQ>.toml             [weights]/[threshold]/[allowlist]（模块2 用）
-    偏好_<QQ>.toml             内容偏好           [like]/[dislike]/[exclude]
 
 ConfigMixin 提供的方法都以 self.config / self.ctx 为前提，由插件类继承使用。
 """
@@ -67,12 +65,6 @@ class ConfigMixin:
 
     def _user_pref_path(self, user_id: str) -> Path:
         return CONFIG_DIR / f"推送偏好_{user_id}.toml"
-
-    def _user_scoring_path(self, user_id: str) -> Path:
-        return CONFIG_DIR / f"推送规则_{user_id}.toml"
-
-    def _pref_path(self, user_id: str) -> Path:
-        return CONFIG_DIR / f"偏好_{user_id}.toml"
 
     def _group_pref_path(self, group_id: str) -> Path:
         return CONFIG_DIR / f"推送偏好_群{group_id}.toml"

@@ -91,15 +91,3 @@ def maisaka_persona() -> str:
         personality, reply_style = "", ""
     parts = [x for x in (personality, reply_style) if x.strip()]
     return "\n".join(parts) if parts else "你是麦麦，一个刚开始入坑、爱探索的航天爱好者。"
-
-
-def translate_short(text: str, logger=None) -> str:
-    """把一句较短的英文（如转发者评论）翻成中文；失败返回原文。"""
-    text = str(text or "").strip()
-    if not text:
-        return ""
-    out = llm_text(
-        f"把下面这句比较短的转发者评论翻译成简体中文，直接输出译文，不要加任何前缀或引号：\n{text}",
-        temperature=0.3, logger=logger,
-    )
-    return str(out or "").strip() or text

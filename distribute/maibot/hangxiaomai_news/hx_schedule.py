@@ -14,7 +14,7 @@
     4) 某目标"静默→活跃"的那一刻 → 每日首推（拉 10 条合成总结卡）
        否则按 各自的上次推送时间 + 随机间隔 到点就发；一次发几条、是否带图、
        一天最多几次 都是每个目标自己的设置
-    5) 所有目标都没有待发内容：有留档旧闻发旧闻；都没有且连续 3 轮空 → 看"闲聊"开关决定是否说一句
+    5) 所有目标都没有待发内容：连续 3 轮空 → 看"闲聊"开关决定是否说一句
 
 状态字段含义见 hx_state.py 顶部注释。
 """
@@ -34,7 +34,7 @@ if __package__ in (None, ""):
         save_field,
         save_last_push,
     )
-    from hx_store import load_archive, load_switch_state, take_reminder
+    from hx_store import load_switch_state, take_reminder
 else:
     from .hx_paths import STATE_FILE
     from .hx_state import (
@@ -46,7 +46,7 @@ else:
         save_field,
         save_last_push,
     )
-    from .hx_store import load_archive, load_switch_state, take_reminder
+    from .hx_store import load_switch_state, take_reminder
 
 CHANNEL = "maibot"   # 本插件的通道名：source = "maibot:private" / "maibot:group_<群号>"
 
@@ -234,8 +234,7 @@ class ScheduleMixin:
         if sent_any or pending_anywhere:
             return
 
-        # ── 兜底：内容都发完了 → 有留档发留档；都没有且连续 3 轮空才闲聊一句 ──
-        archive = load_archive()
+        # 内容都发完且连续 3 轮空时，按开关决定是否闲聊一句。
         for t in active:
             s = t["settings"]
             kind = t["kind"]
@@ -243,37 +242,25 @@ class ScheduleMixin:
             gap = load_field(state_file, f"next_gap_{kind}", self._next_random_interval(s))
             if last_t and (now - last_t) < gap:
                 continue
-            if archive:
+            if not self._bool_setting(s, "闲聊", True):
+                continue
+            empty = int(load_field(state_file, f"empty_cycles_{kind}", 0) or 0) + 1
+            if empty >= 3:
                 try:
-                    ok = await self._send_one_archive_to(t)
+                    ok = await self._send_casual_to(t)
                     if ok:
-                        self.ctx.logger.info(f"航小麦兜底推送(留档旧闻 -> {kind})")
+                        self.ctx.logger.info(f"航小麦兜底推送(无消息闲聊 -> {kind})")
                         save_field(state_file, f"last_push_ts_{kind}", now)
                         save_field(state_file, f"next_gap_{kind}", self._next_random_interval(s))
                         save_field(state_file, f"empty_cycles_{kind}", 0)
                         record_daily_push(state_file)
-                except Exception as e:
-                    self.ctx.logger.warning(f"航小麦留档兜底失败({kind}): {e}")
-            else:
-                if not self._bool_setting(s, "闲聊", True):
-                    continue
-                empty = int(load_field(state_file, f"empty_cycles_{kind}", 0) or 0) + 1
-                if empty >= 3:
-                    try:
-                        ok = await self._send_casual_to(t)
-                        if ok:
-                            self.ctx.logger.info(f"航小麦兜底推送(无消息闲聊 -> {kind})")
-                            save_field(state_file, f"last_push_ts_{kind}", now)
-                            save_field(state_file, f"next_gap_{kind}", self._next_random_interval(s))
-                            save_field(state_file, f"empty_cycles_{kind}", 0)
-                            record_daily_push(state_file)
-                        else:
-                            save_field(state_file, f"empty_cycles_{kind}", empty)
-                    except Exception as e:
-                        self.ctx.logger.warning(f"航小麦闲聊兜底失败({kind}): {e}")
+                    else:
                         save_field(state_file, f"empty_cycles_{kind}", empty)
-                else:
+                except Exception as e:
+                    self.ctx.logger.warning(f"航小麦闲聊兜底失败({kind}): {e}")
                     save_field(state_file, f"empty_cycles_{kind}", empty)
+            else:
+                save_field(state_file, f"empty_cycles_{kind}", empty)
 
     # ────────────────────────── 和看板渠道打交道（失败一律不抛出）──────────────────────────
 

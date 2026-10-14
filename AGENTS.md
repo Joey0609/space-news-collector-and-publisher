@@ -4,7 +4,7 @@
 
 ```text
 collect/       数据收集：X 采集、图片、源适配器
-process/       数据处理：翻译、打标、评分、AI 兜底
+process/       数据处理：一次完整 AI 分析与最终发/丢
  distribute/   数据分发：maibot / alison / napcat
 dashboard/     本机数据看板与管理台
 data/          运行期数据，不入库
@@ -22,12 +22,9 @@ config/        人维护配置，不入库
 ```powershell
 python main_flow.py
 python collect\news_fetch.py
-python process\translate_db.py
-python process\judge.py
-python process\ai_fallback.py
+python process\analyze_db.py
 python dashboard\server.py
 python selftest\run_all.py
-python tools\migrate_layout.py --dry-run
 ```
 
 看板默认地址：`http://127.0.0.1:8787`。启动终端会打印 token。默认只允许本机访问。
@@ -37,20 +34,17 @@ python tools\migrate_layout.py --dry-run
 ```text
 collect/news_fetch.py
   -> data/raw/new_news_*.json + data/hx.sqlite3 items(stage=collected)
-  -> process/translate_db.py     看板启动时全库扫描一次；之后消费采集写入的 processing_events 增量订阅；
-                                 缺少任一必需字段→同一次完整分析重做。
-                                 产出：zh 译文 / 四盏灯 is_news·not_repeat·not_comment·not_sensitive /
-                                 ai_score AI 价值分(0~100) / ai_title / ai_summary / importance / ai_tags，
-                                 stage=translated
-  -> process/judge.py            四绿→发、任一红→丢（老条目走规则分+阈值），rules_score/decision/reason，stage=judged
-  -> process/ai_fallback.py      decision（最终判定直接写回），stage=processed
+  -> process/analyze_db.py       启动一次完整性核对，之后消费 processing_events；
+                                 一次 AI 请求产出译文、引用译文、标题、摘要、重要度、分数、标签、
+                                 decision（发/丢）、invalid_reason、repeat_of；
+                                 每条完整校验后原子提交 stage=processed 并确认同版本事件。
   -> stage='processed' AND decision='发' + items.pushed（**不再写队列文件**）
   -> 看板渠道 WebSocket（127.0.0.1:8788）→ maibot 插件 / 艾莉森 / NapCat
 ```
 
-`main_flow.py` 会按上述顺序调用采集、翻译、判定、AI 兜底。"该发"的条目就一直留在 SQLite 里，
+`main_flow.py` 调用采集与完整分析；看板处理服务直接运行完整分析入口。"该发"的条目就一直留在 SQLite 里，
 由看板按渠道的 source 逐条发出去（见下「分发队列与渠道」）。
-（`process/translate.py` / `judge.py` 也支持旧的 JSON 入参，但主流程只走 SQLite。）
+旧 JSON 处理入口、Judge、AI 兜底、四灯和规则加权已删除，不保留兼容壳。
 
 ## 分发队列与渠道（重要）
 
@@ -90,18 +84,16 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
   自检 `check_channels.py` 的第 [5] 段让它和仓库实现跑同一个真 WS 服务端，保证两边一致。
 - 内置渠道写在 `dashboard/channels.py` 的 `BUILTIN_CHANNELS`（maibot=plugin 外部渠道；
   alison/napcat=process 托管渠道，看板按 `channels.command` 启停进程）。
-- 旧 `data/queue/待推送.json` / `已发记录.json` 只在第一次注册 source 时**读一次**做迁移
-  （`push_db._seed_legacy`），之后再也不写；队列上限、队列档案、`sent_to` 那套文件语义都作废了。
+- 不读取旧 JSON 队列或旧群状态文件；分发队列与发送记录仅使用新结构 SQLite。
 
 ## 数据位置
 
 - `data/raw/`：采集原始 JSON。
-- `data/work/`：翻译、打分、AI 兜底中间结果。
+- `data/work/`：运行进度与临时输出，不保存多阶段分析中间结果。
 - `data/images/`：图片。
-- `data/queue/`：**历史遗留**。`待推送.json` / `已发记录.json` / `内容留档.json` 里，前两个只在
-  首次迁移时被读一次（见「分发队列」），内容留档仍是"队列空时发旧闻"的兜底素材。
+- `data/queue/`：旧文件已清理；程序不再读取或写入 JSON 新闻队列与旧闻留档。
 - `data/state/`：抓取基线、扫描游标、插件状态、看板 token、审计日志。
-- `data/hx.sqlite3`：SQLite 台账，保存内容与分发记录（含 `items.pushed` 分发状态）。
+- `data/hx.sqlite3`：SQLite 台账，保存内容与分发记录（含 `items.pushed` 分发状态与 AI 无效原因）。
 - `data/markdown/`：从数据库导出的可读归档。
 - `config/`：功能开关、推送规则、推送默认、用户/群偏好。
 
@@ -131,12 +123,13 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 
 ### process
 
-- `translate_db.py`：处理服务启动时全库扫描一次；之后只处理 `collect.db` 发布到 `processing_events` 的新增/变更条目 ID。缺译文、四灯、有效 AI 分、标签、标题、正文清理、新闻要点/重要度或引用译文任一项时，都用同一次完整分析重做；失败统一记在 `translate_attempts` / `translate_error`，通过订阅事件延迟重试。判"不重复"时会带上"最近已入库标题清单"（`AI_REPEAT_CONTEXT` 条，0=关）。
-- `translate.py`：保留的 JSON 版翻译入口，逻辑同上，读写 `data/raw` 与 `data/work`。
-- `judge.py`：**四绿直接发、任一红直接丢**（`[gate] "AI分下限" > 0` 时四绿但 AI 分太低也丢；老条目没点灯时回到规则分+阈值+AI兜底）。`items.score` 优先用 AI 分、没分才用 `rules_score`。标签取自 `ai_tags` + `重要:高/中/低`；白名单/排除/阈值照旧。`[gate] 三灯放行 = false` 可退回纯打分。
-- `ai.py`：全部提示词在这里；`tools/dump_prompts.py` 会把真实提示词导出成 `提示词.md`（改完提示词记得重跑它）。
-- `ai_fallback.py`：边缘分数最终判断。
-- `process_core_contract.py`：RawItem 归一化/校验起点。
+- `analyze_db.py`：唯一处理入口；每次成功 AI 请求拿齐完整归档与最终操作码。
+  丢弃条目也生成译文、标题、摘要、重要度、评分和标签，无效原因由AI结合预设情形生成。
+  本地只做输出契约和事实依据校验；失败记 analysis_attempts / analysis_error，冷却后轮转重试，无累计上限。
+  结果提交与 processing_events 同版本确认在一个事务内；输入或generation变化时丢弃旧回复。
+- `ai.py`：唯一完整分析提示词、三协议模型调用和输出校验；改提示词后执行 tools/dump_prompts.py。
+- `analysis_contract.py`：处理服务与看板共享的完整性契约。
+
 
 ### distribute
 
@@ -176,9 +169,8 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 
 实时与分页（看板要和采集/翻译同步）：
 
-- `items.rev`：每次改这一行就 +1（`collect/db.py` 采集更新、`translate_db.py` 完整分析、
-  `judge.py`、`ai_fallback.py`、看板改译文都 +1）。翻译是**就地更新**已有行、id 不变，
-  只看 id 会漏掉"译文/四盏灯刚写好"，所以增量必须靠 rev。
+- `items.rev`：每次改这一行就 +1（`collect/db.py` 采集更新、`analyze_db.py` 完整分析、看板改译文都 +1）。翻译是**就地更新**已有行、id 不变，
+  只看 id 会漏掉"完整分析刚提交"，所以增量必须靠 rev。
 - SSE（`/api/stream`）每秒推 `latest_id` / `latest_rev`；前端发现游标变大就拉
   `/api/snapshot?since_id=&since_rev=`，把"新条目 + 被更新过的条目"打补丁上屏（约 1 秒）。
 - 前端每 15 秒（`RECONCILE_MS`）对"最新 ~ 当前显示的这一段"做一次全量核对
@@ -201,16 +193,12 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 
 启用 WAL 和 busy timeout。数据库写失败不得阻断主流程。
 
-## 迁移
+## 单次分析数据重建
 
-旧部署数据可先执行：
-
-```powershell
-python tools\migrate_layout.py --dry-run
-python tools\migrate_layout.py --apply
-```
-
-执行前停止计划任务、MaiBot 和艾莉森定时推送。迁移工具会尝试移动旧 JSON、图片、状态，并初始化数据库。
+停机后执行 `.venv\Scripts\python.exe tools\reset_analysis_data.py --apply`。
+按 collected_at 倒序保留15条，再从其余条目随机选15条；保存随机种子和保留ID。
+只保留原文、引用、来源和图片，全部重新分析；发送记录清空，渠道配置保留。
+先做离线数据库备份；新结构不导入旧分析字段或旧JSON队列。
 
 ## 当前验收状态
 

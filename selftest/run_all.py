@@ -36,6 +36,7 @@ CHECKS = [
     ("dashboard", HERE / "check_dashboard.py"),
     ("AI config", HERE / "check_ai_config.py"),
     ("retry rotation", HERE / "check_retry_rotation.py"),
+    ("data reset", HERE / "check_data_reset.py"),
 ]
 
 
