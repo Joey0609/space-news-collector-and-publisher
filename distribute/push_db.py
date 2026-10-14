@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +39,12 @@ LEGACY_SENT_FILES = (QUEUE_DIR / "已发记录.json",)
 SEED_FLAG = "push_seeded"
 
 PASSED_SQL = "TRIM(COALESCE(decision, '')) = '发' AND COALESCE(stage, '') = 'processed'"
+PENDING_MAX_AGE_SECONDS = 5 * 24 * 60 * 60
+
+
+def _pending_cutoff_ts() -> int:
+    """统一按发布时间过滤：只允许最近 5 天的内容进入任一渠道队列。"""
+    return int(time.time()) - PENDING_MAX_AGE_SECONDS
 
 
 # ────────────────────────── source 命名 ──────────────────────────
@@ -254,14 +261,16 @@ def registry(db_file=None) -> list:
 # ────────────────────────── 读待推送 ──────────────────────────
 
 def pending(source: str = "", db_file=None) -> list:
-    """`stage='processed' AND decision='发'` 的条目，按入库顺序（id 升序）。
+    """最近 5 天内且 `stage='processed' AND decision='发'` 的条目，按入库顺序。
 
     给了 source 就只回"这个 source 还没发过"的（pushed 里不是 true 的都算没发）。
+    发布时间缺失或超过 5 天的条目不进入任何渠道的待发队列。
     """
     conn = connect(db_file)
     try:
         rows = conn.execute(f"SELECT * FROM items WHERE {PASSED_SQL} "
-                            "ORDER BY id ASC").fetchall()
+                            "AND CAST(ts AS INTEGER) >= ? ORDER BY id ASC",
+                            (_pending_cutoff_ts(),)).fetchall()
         items = [_row_to_item(row) for row in rows]
     finally:
         conn.close()
@@ -292,7 +301,9 @@ def pending_count(db_file=None, sources=None) -> int:
     conn = connect(db_file)
     try:
         known = _registry(conn) if sources is None else [str(s) for s in sources if str(s)]
-        rows = conn.execute(f"SELECT pushed FROM items WHERE {PASSED_SQL}").fetchall()
+        rows = conn.execute(f"SELECT pushed FROM items WHERE {PASSED_SQL} "
+                            "AND CAST(ts AS INTEGER) >= ?",
+                            (_pending_cutoff_ts(),)).fetchall()
     finally:
         conn.close()
     if not known:

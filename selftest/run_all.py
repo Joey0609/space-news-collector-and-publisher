@@ -29,10 +29,13 @@ REPO = HERE.parent
 
 CHECKS = [
     ("collect", HERE / "check_pipeline.py"),
+    ("web sources", HERE / "check_web_sources.py"),
     ("channels", HERE / "check_channels.py"),
     ("Alison", HERE / "check_ali.py"),
     ("MaiBot plugin", HERE / "check_plugin.py"),
     ("dashboard", HERE / "check_dashboard.py"),
+    ("AI config", HERE / "check_ai_config.py"),
+    ("retry rotation", HERE / "check_retry_rotation.py"),
 ]
 
 

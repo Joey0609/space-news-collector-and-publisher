@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -32,14 +33,15 @@ from process.analysis_contract import missing_analysis_fields, processing_requir
 from dashboard import alison_config  # noqa: E402
 from dashboard import channels as channel_hub  # noqa: E402
 from dashboard.ws import ChannelWSServer  # noqa: E402
+from process import model_endpoints  # noqa: E402
 
 LOCK = threading.Lock()
 PROCESSES: dict[str, subprocess.Popen] = {}
 # 服务 = 看板固定托管的那两个循环；分发改为"渠道"（见 /api/channels 与 channels.py）
 SERVICE_NAMES = {"collect": "采集", "process": "处理"}
 CONFIG_FIELDS = {
-    "collect": ["PROXY_URL", "COOKIES_PATH", "SCAN_BATCH", "PAUSE_SECONDS", "COLLECT_INTERVAL_SECONDS"],
-    "process": ["MODEL_PROTOCOL", "MODEL_API_BASE", "MODEL_NAME", "MODEL_API_KEY", "MODEL_TIMEOUT", "MODEL_MAX_TOKENS", "AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES", "TRANSLATE_RATE_LIMIT_WAIT", "TRANSLATE_PAUSE_SECONDS"],
+    "collect": ["PROXY_URL", "COOKIES_PATH", "SCAN_BATCH", "PAUSE_SECONDS", "COLLECT_INTERVAL_SECONDS", "WEB_COLLECT_INTERVAL_SECONDS", "SOURCES"],
+    "process": ["AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES", "TRANSLATE_RATE_LIMIT_WAIT", "TRANSLATE_PAUSE_SECONDS"],
 }
 CHANNEL_KEY_PREFIX = "channel:"
 WS_PORT = int(os.getenv("HX_WS_PORT", "") or 8788)
@@ -52,6 +54,7 @@ CHOICE_FIELDS = {
 # 未配置时在表单里显示的默认值（避免用户面对空白不知道填什么）
 # 注意：模型地址/名称没有默认服务商，留空就是"必须自己填"。
 FIELD_DEFAULTS = {
+    "WEB_COLLECT_INTERVAL_SECONDS": "900",
     "MODEL_PROTOCOL": "openai",
     "MODEL_API_BASE": "",
     "MODEL_NAME": "",
@@ -87,15 +90,7 @@ def read_json(path: Path, default):
 
 
 def env_values() -> dict[str, str]:
-    path = ROOT / ".env"
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key.strip() and not key.lstrip().startswith("#"):
-            values[key.strip()] = value.strip()
-    return values
+    return model_endpoints.read_env(ROOT / ".env")
 
 
 def normalize_cookies(raw: str) -> str:
@@ -185,7 +180,32 @@ def save_service_config(name: str, updates: dict) -> None:
                 raise ValueError("配置值不能包含换行")
             if key in SECRET_FIELDS and text == "":
                 continue
+            if key == "WEB_COLLECT_INTERVAL_SECONDS":
+                if not text.isdigit() or int(text) < 10:
+                    raise ValueError("网页刷新间隔必须是不小于 10 的整数秒")
+            if key == "SOURCES" and set(value.strip() for value in text.split(",") if value.strip()) - {"x", "rss", "snapi", "sina"}:
+                raise ValueError("启用来源只允许 x,rss,snapi,sina；留空全部启用")
+            if name == "process":
+                try:
+                    number = float(text)
+                    if not math.isfinite(number) or number < 0:
+                        raise ValueError()
+                    if key in {"AI_REPEAT_CONTEXT", "TRANSLATE_MAX_ATTEMPTS", "TRANSLATE_INLINE_RETRIES"}:
+                        if int(text) < (1 if key == "TRANSLATE_MAX_ATTEMPTS" else 0):
+                            raise ValueError()
+                except ValueError as exc:
+                    raise ValueError("处理参数必须是有效的非负数；次数和条数必须为整数，最大处理尝试次数至少为 1") from exc
             clean[key] = text
+    write_env(clean)
+
+
+def write_env(clean: dict) -> None:
+    """串行化配置写入并原子替换，保留其他服务配置和注释。"""
+    with LOCK:
+        _write_env_unlocked(clean)
+
+
+def _write_env_unlocked(clean: dict) -> None:
     path = ROOT / ".env"
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     written = set()
@@ -201,12 +221,40 @@ def save_service_config(name: str, updates: dict) -> None:
     for key, value in clean.items():
         if key not in written:
             result.append(f"{key}={value}")
-    path.write_text("\n".join(result) + "\n", encoding="utf-8")
+    temporary = path.with_suffix(".env.tmp")
+    temporary.write_text("\n".join(result) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
-def all_items(offset: int = 0, limit: int = 20) -> list[dict]:
-    """分页读台账（新的在前）。offset/limit 给"滚动加载更多"用。"""
-    return _item_rows("", "LIMIT ? OFFSET ?", (max(1, int(limit)), max(0, int(offset))))
+def save_ai_config(payload: dict, use=False) -> dict:
+    """保存编辑不会改变使用项；只有明确的 use 操作才切换。"""
+    path = ROOT / ".env"
+    with LOCK:
+        if payload.get("version") != model_endpoints.version(path):
+            raise ValueError("配置已被其他窗口修改，请关闭弹窗后重新打开")
+        old, active = model_endpoints.read_settings(path)
+        if use:
+            active = str(payload.get("id", ""))
+        endpoints = model_endpoints.validate_endpoints(payload.get("endpoints"), old, active, activating=use)
+        _write_env_unlocked(model_endpoints.encoded_settings(endpoints, active))
+        result = model_endpoints.public_settings(path)
+    audit("ai_use" if use else "ai_config", {"active_id": active, "endpoint_ids": [item["id"] for item in endpoints]})
+    return result
+
+
+ITEM_SEARCH_FIELDS = ("raw", "zh", "ai_title", "ai_summary", "quoted_raw", "quoted_zh",
+                      "account", "orig_account", "quoted_account", "forward_comment", "ai_tags", "reason", "ori_url")
+ITEM_SORTS = {
+    "published": "COALESCE(ts,0) DESC, id DESC",
+    "collected": "(collected_at IS NOT NULL AND collected_at <> '') DESC, collected_at DESC, id DESC",
+    "processed": "(processed_at IS NOT NULL AND processed_at <> '') DESC, processed_at DESC, id DESC",
+}
+
+
+def all_items(offset: int = 0, limit: int = 20, query: str = "", sort: str = "published") -> list[dict]:
+    """按搜索词和选择的时间顺序分页读取台账。"""
+    return _item_rows("", "LIMIT ? OFFSET ?", (max(1, int(limit)), max(0, int(offset))),
+                      search=query, sort=sort)
 
 
 def changed_items(since_id: int = 0, since_rev: int = 0, limit: int = 300) -> list[dict]:
@@ -224,7 +272,7 @@ def changed_items(since_id: int = 0, since_rev: int = 0, limit: int = 300) -> li
     )
 
 
-def _item_rows(where_sql: str, tail_sql: str, params: tuple) -> list[dict]:
+def _item_rows(where_sql: str, tail_sql: str, params: tuple, *, search: str = "", sort: str = "published") -> list[dict]:
     """台账查询：WHERE 必须排在 ORDER BY 前面，分页的 LIMIT 排在后面。"""
     try:
         import sqlite3
@@ -233,9 +281,18 @@ def _item_rows(where_sql: str, tail_sql: str, params: tuple) -> list[dict]:
             return []
         conn = sqlite3.connect(db)
         conn.row_factory = sqlite3.Row
+        clauses = [where_sql[6:]] if where_sql.startswith("WHERE ") else []
+        query = str(search or "").strip()[:200]
+        query_params = []
+        if query:
+            clauses.append("(" + " OR ".join(f"COALESCE({field},'') LIKE ?" for field in ITEM_SEARCH_FIELDS) + ")")
+            pattern = f"%{query}%"
+            query_params.extend([pattern] * len(ITEM_SEARCH_FIELDS))
+        combined_where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order = ITEM_SORTS.get(sort, ITEM_SORTS["published"])
         rows = [dict(r) for r in conn.execute(
-            f"SELECT * FROM items {where_sql} ORDER BY COALESCE(ts,0) DESC, id DESC {tail_sql}",
-            params,
+            f"SELECT * FROM items {combined_where} ORDER BY {order} {tail_sql}",
+            (*query_params, *params) if not where_sql else (*params[:2], *query_params, *params[2:]),
         ).fetchall()]
         conn.close()
     except Exception as exc:
@@ -273,6 +330,27 @@ def item_stats() -> tuple[int, int, int]:
     except Exception as exc:
         print(f"[看板] SQLite 统计失败: {exc}", flush=True)
         return 0, 0, 0
+
+
+def matching_item_count(search: str = "") -> int:
+    """搜索框当前匹配的台账条数。"""
+    query = str(search or "").strip()[:200]
+    try:
+        db = DATA / "hx.sqlite3"
+        if not db.exists():
+            return 0
+        conn = sqlite3.connect(db)
+        if query:
+            pattern = f"%{query}%"
+            predicate = " OR ".join(f"COALESCE({field},'') LIKE ?" for field in ITEM_SEARCH_FIELDS)
+            row = conn.execute(f"SELECT COUNT(*) FROM items WHERE {predicate}", [pattern] * len(ITEM_SEARCH_FIELDS)).fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) FROM items").fetchone()
+        conn.close()
+        return int(row[0] or 0)
+    except Exception as exc:
+        print(f"[看板] 搜索计数读取失败: {exc}", flush=True)
+        return 0
 
 
 def services() -> dict:
@@ -337,12 +415,8 @@ def process_backlog(include_items: bool = True) -> dict:
 
     candidates = [dict(row) for row in rows if processing_required(dict(row))]
     if not include_items:
-        ready_count = sum(1 for item in candidates
-                          if not missing_analysis_fields(item)
-                          or int(item.get("translate_attempts") or 0) < max_attempts)
-        stuck_count = len(candidates) - ready_count
-        return {"items": [], "remaining_count": len(candidates), "ready_count": ready_count,
-                "stuck_count": stuck_count}
+        return {"items": [], "remaining_count": len(candidates), "ready_count": len(candidates),
+                "stuck_count": 0}
 
     items = []
     ready_count = stuck_count = 0
@@ -351,11 +425,8 @@ def process_backlog(include_items: bool = True) -> dict:
         if not missing:
             missing.append("流程阶段")
         attempts = int(item.get("translate_attempts") or 0)
-        stuck = bool(missing_analysis_fields(item)) and attempts >= max_attempts
-        if stuck:
-            stuck_count += 1
-        else:
-            ready_count += 1
+        stuck = False
+        ready_count += 1
         items.append({
             "id": item.get("id"), "origin_id": item.get("origin_id"),
             "account": item.get("account") or "未知账号",
@@ -409,7 +480,19 @@ def state() -> dict:
     for channel in channel_list:
         if channel.get("adapter") == channel_hub.ADAPTER_PROCESS:
             channel["running"] = channel_process_running(channel["id"])
+    try:
+        from collect.sources._web.store import snapshot as collection_snapshot
+        collection_state = collection_snapshot(STATE / "web_collect.sqlite3", news_path=DATA / "hx.sqlite3")
+    except Exception:
+        from collect.sources._web.store import source_inventory
+        warning = {"source": "采集账本", "url": "", "stage": "state",
+                   "error_type": "STATE_READ_ERROR", "detail": "采集账本读取失败", "updated_at": time.time()}
+        collection_state = {"sources": [{**row, "state": "error", "last_error": warning,
+                                         "collected": None, "stored_count": None, "pending_count": None,
+                                         "failed_count": None} for row in source_inventory()],
+                            "warnings": [warning], "failed_count": 0}
     return {
+        "collection": collection_state,
         "services": services(),
         "process_progress": process_progress(),
         "channels": channel_list,
@@ -433,6 +516,7 @@ def summary() -> dict:
     return {
         "services": data["services"],
         "process_progress": data["process_progress"],
+        "collection": data["collection"],
         "channels": data["channels"],
         "item_count": stats["item_count"],
         "latest_id": stats["latest_id"],
@@ -445,19 +529,21 @@ def summary() -> dict:
     }
 
 
-def snapshot(offset: int = 0, limit: int = 20, since_id: int = 0, since_rev: int = 0) -> dict:
+def snapshot(offset: int = 0, limit: int = 20, since_id: int = 0, since_rev: int = 0,
+             search: str = "", sort: str = "published") -> dict:
     """since_id/since_rev 任一 > 0 → 只回"新条目 + 被更新过的条目"（实时补丁）；
     否则回第 offset 页（默认 20 条）给首屏与"滚动加载更多"。"""
     data = summary()
     changes = since_id > 0 or since_rev > 0
     data["incremental"] = changes
+    data["result_total"] = matching_item_count(search)
     if changes:
         data["items"] = changed_items(since_id, since_rev)
     else:
-        data["items"] = all_items(offset, limit)
+        data["items"] = all_items(offset, limit, query=search, sort=sort)
         data["offset"] = max(0, int(offset))
         data["limit"] = max(1, int(limit))
-        data["has_more"] = max(0, int(offset)) + len(data["items"]) < int(data["item_count"] or 0)
+        data["has_more"] = max(0, int(offset)) + len(data["items"]) < data["result_total"]
     return data
 
 
@@ -769,6 +855,10 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return default
 
+    def query_text(self, name: str, default: str = "") -> str:
+        query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+        return str(query.get(name, [default])[0])[:200]
+
     # ────────────────────────── GET 路由 ──────────────────────────
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
@@ -781,11 +871,14 @@ class Handler(BaseHTTPRequestHandler):
                     limit=self.query_int("limit", 20) or 20,
                     since_id=self.query_int("since_id", 0),
                     since_rev=self.query_int("since_rev", 0),
+                    search=self.query_text("q"),
+                    sort=self.query_text("sort", "published"),
                 ))
             if path == "/api/items":
                 offset, limit = self.query_int("offset", 0), self.query_int("limit", 20) or 20
-                return self.ok({"items": all_items(offset, limit), "offset": offset,
-                                "limit": limit, "total": item_stats()[0]})
+                search, sort = self.query_text("q"), self.query_text("sort", "published")
+                return self.ok({"items": all_items(offset, limit, query=search, sort=sort), "offset": offset,
+                                "limit": limit, "total": matching_item_count(search)})
             if path == "/api/process/backlog":
                 return self.ok(process_backlog())
             if path == "/api/channels":
@@ -815,6 +908,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.auth():
                     return self.fail("invalid token", 401)
                 return self.ok(alison_config.config())
+            if path == "/api/config/ai":
+                if not self.auth():
+                    return self.fail("invalid token", 401)
+                return self.ok(model_endpoints.public_settings(ROOT / ".env"))
             if path.startswith("/api/config/") or path.startswith("/api/service/config/"):
                 if not self.auth():
                     return self.fail("invalid token", 401)
@@ -854,6 +951,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/channels/toggle":
                 return self.ok(toggle_channel(str(payload.get("channel", "")),
                                               bool(payload.get("enabled"))))
+            if path in ("/api/config/ai", "/api/config/ai/use"):
+                return self.ok(save_ai_config(payload, use=path.endswith("/use")))
             if path == "/api/config/alison":
                 result = alison_config.save(payload.get("values", {}))
                 audit("alison_config", {"keys": result["keys"]})
@@ -921,6 +1020,8 @@ def main() -> None:
                         help="渠道 WebSocket 端口（默认 8788，或环境变量 HX_WS_PORT）")
     parser.add_argument("--open-browser", action="store_true",
                         help="HTTP 端口绑定成功后在浏览器打开看板")
+    parser.add_argument("--no-auto-process", action="store_true", help="本机验收时不自动启动模型处理")
+    parser.add_argument("--no-channel-server", action="store_true", help="本机验收时不启动渠道连接与投递")
     args = parser.parse_args()
     WS_PORT = args.ws_port
     dashboard_token = token()
@@ -930,10 +1031,11 @@ def main() -> None:
     print(f"[分发] 启动扫描最终输出池：当前启用 source 待发 {startup_pending} 条", flush=True)
 
     # 渠道 WebSocket：和 HTTP 同一个进程、独立端口；起不来不拖垮看板（只记日志）
-    WS_SERVER = ChannelWSServer("127.0.0.1", WS_PORT, dashboard_token,
+    if not args.no_channel_server:
+        WS_SERVER = ChannelWSServer("127.0.0.1", WS_PORT, dashboard_token,
                                 handle_message=channel_hub.handle_message,
                                 on_disconnect=channel_hub.unregister_connection)
-    if not WS_SERVER.start():
+    if WS_SERVER is not None and not WS_SERVER.start():
         print(f"[渠道WS] 端口 {WS_PORT} 起不来，渠道将无法连接（看板其余功能可用）", flush=True)
     print(f"渠道请连：ws://127.0.0.1:{WS_PORT}/ws?token=<上面的 token>", flush=True)
 
@@ -952,8 +1054,9 @@ def main() -> None:
                 opener.start()
             print(f"[看板] 服务器终端已就绪：http://127.0.0.1:{args.port}/"
                   "（关闭此终端即停止服务）", flush=True)
-            process_pid = start_service("process")
-            print(f"[处理] 看板启动时自动启动处理订阅服务，PID={process_pid}", flush=True)
+            if not args.no_auto_process:
+                process_pid = start_service("process")
+                print(f"[处理] 看板启动时自动启动处理订阅服务，PID={process_pid}", flush=True)
             httpd.serve_forever()
     finally:
         if WS_SERVER is not None:

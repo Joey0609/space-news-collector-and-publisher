@@ -221,3 +221,5 @@ P4/P5：完成第一版。看板后端和前端可本机启动，后续可继续
 
 最终验收：离线自检五项（collect / channels / Alison / MaiBot plugin / dashboard）全部通过；
 不代表已经执行过真实 X 抓取或真实 QQ 发送。
+
+## AI必须保证启动的dashboard有终端弹窗，而不是后台静默启动。如果需要暂停服务尽量只暂停对应的服务，而不是直接关闭整个dashboard。

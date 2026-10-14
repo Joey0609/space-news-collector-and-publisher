@@ -5,6 +5,7 @@
 并写好 `ADAPTER = XxxAdapter()`，本入口会自动把它跑起来。
 """
 import asyncio
+import argparse
 import sys
 from pathlib import Path
 
@@ -26,10 +27,27 @@ LOG_FILE = LOG_DIR / "news_fetch.log"
 log = make_log(LOG_FILE)
 
 
-async def main():
+async def main(names=None):
     log("=" * 55)
     log("航小麦 · 采集（遍历所有已注册的源）")
-    await sources.collect_all(log)
+    from sources._web.locking import acquire
+    selected = sources.enabled_sources(names)
+    if not selected:
+        log("[采集] 没有启用的采集源")
+        return
+    groups = {"x" if adapter.name == "x" else "web" for adapter in selected}
+    locks = []
+    try:
+        for group in sorted(groups):
+            handle = acquire(group)
+            if handle is None:
+                log(f"[采集锁] {group} 已有一轮在运行，本次退出")
+                return
+            locks.append(handle)
+        await sources.collect_all(log, [adapter.name for adapter in selected])
+    finally:
+        for handle in locks:
+            handle.close()
     log("=== 检测结束 ===")
 
 
@@ -39,4 +57,13 @@ if __name__ == "__main__":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     except Exception:
         pass
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sources", help="本轮采集源，逗号分隔：x,rss,snapi,sina")
+    args = parser.parse_args()
+    names = None
+    if args.sources is not None:
+        names = [value.strip() for value in args.sources.split(",") if value.strip()]
+        registered = {adapter.name for adapter in sources.all_sources()}
+        if not names or set(names) - registered:
+            parser.error("--sources 必须是已注册的非空采集源列表")
+    asyncio.run(main(names))

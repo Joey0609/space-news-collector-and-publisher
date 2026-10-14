@@ -121,15 +121,35 @@ def cleanup_old_outputs(keep: int = 3) -> None:
 
 
 def run_processing(item_ids=None) -> bool:
-    """处理完整输入池，或只处理订阅提供的增量 ID。"""
-    scoped_args = []
-    incremental_count = 0
+    """处理完整输入池，或逐条完成订阅项后立即公开到分发池。"""
     if item_ids is not None:
-        ids = sorted({int(value) for value in item_ids})
+        ids = list(dict.fromkeys(int(value) for value in item_ids))
         if not ids:
             return True
-        incremental_count = len(ids)
-        scoped_args = ["--item-ids", ",".join(str(value) for value in ids)]
+        failures = 0
+        for index, item_id in enumerate(ids, 1):
+            scoped_args = ["--item-ids", str(item_id)]
+            log(f"[订阅处理] 开始单条 {index}/{len(ids)}，item_id={item_id}")
+            stages = (
+                ("正在准备翻译和点灯", "translate_db.py"),
+                ("正在按四盏灯和规则判定", "judge.py"),
+                ("正在进行 AI 兜底判定", "ai_fallback.py"),
+            )
+            for phase, script in stages:
+                write_processing_stage(f"{phase}（{index}/{len(ids)}，item_id={item_id}）")
+                if not run_module(script, *scoped_args):
+                    failures += 1
+                    log(f"[订阅处理] item_id={item_id} 的 {script} 失败，继续处理后续条目")
+                    break
+            else:
+                log(f"[订阅处理] item_id={item_id} 完成，最终结果已提交并可供分发")
+        if failures:
+            log(f"[错误] {failures} 个单条处理阶段失败；其余条目已继续处理")
+            return False
+        log(f"[结果] 订阅增量逐条处理完成，共 {len(ids)} 条")
+        return True
+
+    scoped_args = []
     write_processing_stage("正在准备翻译和点灯")
     success = True
     try:
@@ -146,8 +166,6 @@ def run_processing(item_ids=None) -> bool:
             log(f"[结果] 库里判定'发'共 {should} 条；{queue_describe()}")
             log(f"[结果] 待分发 {queue_pending_count()} 条（分发端直接读库，不写队列文件）")
             cleanup_old_outputs()
-        else:
-            log(f"[结果] 本轮处理订阅增量 {incremental_count} 条")
     finally:
         write_processing_stage("本轮处理结束", running=False)
 
@@ -155,6 +173,7 @@ def run_processing(item_ids=None) -> bool:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--collect-only", action="store_true", help="只执行采集")
+    parser.add_argument("--sources", help="本轮采集源，逗号分隔；不改变保存的配置")
     parser.add_argument("--process-only", action="store_true", help="只执行处理阶段")
     parser.add_argument("--item-ids", help="处理订阅收到的逗号分隔条目 ID")
     args = parser.parse_args()
@@ -164,7 +183,7 @@ def main() -> None:
         for value in args.item_ids.split(","):
             if value.strip().isdigit():
                 item_ids.append(int(value.strip()))
-        item_ids = sorted(set(item_ids))
+        item_ids = list(dict.fromkeys(item_ids))
         if not item_ids:
             parser.error("--item-ids 没有有效条目 ID")
         if not args.process_only or args.collect_only:
@@ -172,7 +191,7 @@ def main() -> None:
     log("=" * 55)
     log("航小麦 · 主流程")
     if not args.process_only:
-        collect_ok = run_module("news_fetch.py")
+        collect_ok = run_module("news_fetch.py", *(["--sources", args.sources] if args.sources is not None else []))
         if not collect_ok:
             log("[错误] 采集阶段失败，停止本轮处理")
             raise SystemExit(1)

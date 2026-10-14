@@ -8,6 +8,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -68,10 +69,10 @@ import sources as registry             # noqa: E402
 check("统一 X adapter", ADAPTER.name == "x" and callable(ADAPTER.collect))
 
 print("[1b] 源注册表：自动发现 + 遍历")
-check("注册表发现了 x 源", [s.name for s in registry.all_sources()] == ["x"],
+check("注册表发现 X 与三个网页采集器", [s.name for s in registry.all_sources()] == ["rss", "sina", "snapi", "x"],
       [getattr(s, "name", "?") for s in registry.all_sources()])
-check("enabled_sources() 默认返回全部源",
-      [s.name for s in registry.enabled_sources()] == ["x"])
+check("显式空列表返回全部已注册源",
+      [s.name for s in registry.enabled_sources([])] == ["rss", "sina", "snapi", "x"])
 check("enabled_sources(['x']) 能按名字挑",
       [s.name for s in registry.enabled_sources(["x"])] == ["x"])
 check("未知源名不炸、只是跳过", registry.enabled_sources(["nope"]) == [])
@@ -352,6 +353,50 @@ check("提示词带来源账号", "@SpaceX" in llm.build_analysis_prompt("Starsh
 check("提示词无账号时不残留占位符", "{source}" not in llm.build_analysis_prompt("Starship"))
 check("提示词带已入库清单", "#56 星舰试飞" in llm.build_analysis_prompt("x", "a", ["#56 星舰试飞"]))
 check("清单为空时不留占位符", "{known}" not in llm.build_analysis_prompt("x", "a"))
+check("完整分析格式不再包含具体新闻示例",
+      '"title":"星舰第 11 次试飞成功"' not in llm.ANALYSIS_PROMPT
+      and '"summary":"SpaceX 完成星舰' not in llm.ANALYSIS_PROMPT)
+check("ISS 摄影原文不能变成星舰试飞",
+      raises(lambda: llm.validate_analysis_grounding(plain, "I captured the ISS!")))
+check("感想不能借用历史标题补造星舰主体",
+      raises(lambda: llm.validate_analysis_grounding(plain, "One of the most incredible launches I have ever seen.")))
+check("星舰原文没有编号时不能补成第11次试飞",
+      raises(lambda: llm.validate_analysis_grounding(plain, "Starship launched successfully.")))
+check("原文明确给出的星舰第11次试飞仍可正常处理",
+      not raises(lambda: llm.validate_analysis_grounding(plain, "Starship Flight 11 completed its flight.")))
+check("引用提供的任务信息也作为校验依据",
+      not raises(lambda: llm.validate_analysis_grounding(plain, "An incredible launch!", "Starship's eleventh test flight succeeded.")))
+import tempfile
+from collect import db as repair_db_module
+from tools.repair_analysis_pollution import repair as repair_pollution
+with tempfile.TemporaryDirectory() as directory:
+    repair_root = Path(directory)
+    repair_db = repair_root / "hx.sqlite3"
+    with sqlite3.connect(repair_db) as repair_conn:
+        repair_db_module.ensure_schema(repair_conn)
+        repair_conn.execute("CREATE TABLE push_attempts(item_id INTEGER,status TEXT)")
+        repair_conn.execute("INSERT INTO items(id,raw,zh,ai_title,stage,decision,pushed) VALUES(1,?,?,?,?,?,?)",
+                            ("I captured the ISS!", plain["zh"], plain["title"], "processed", "发", '{"alison:test":true}'))
+        repair_conn.execute("INSERT INTO items(id,raw,zh,ai_title,stage,decision) VALUES(2,?,?,?,?,?)",
+                            ("Starship Flight 11 completed its flight.", plain["zh"], plain["title"], "processed", "发"))
+        repair_conn.execute("INSERT INTO pushes(item_id,source) VALUES(1,'alison:test')")
+        repair_conn.execute("INSERT INTO push_attempts VALUES(1,'success')")
+        db_id = 1
+        repair_db_module.enqueue_processing_event(repair_conn, db_id)
+    repair_conn.close()
+    preview = repair_pollution(repair_db, log=lambda text: None)
+    result = repair_pollution(repair_db, apply=True, backup_root=repair_root / "backups", log=lambda text: None)
+    with sqlite3.connect(repair_db) as repair_conn:
+        repaired = repair_conn.execute("SELECT raw,zh,stage,decision,pushed FROM items WHERE id=1").fetchone()
+        check("错误条目直接删除并移出发送池", repaired is None)
+        check("删除错误条目保留历史发送审计", repair_conn.execute("SELECT COUNT(*) FROM pushes").fetchone()[0] == 1
+              and repair_conn.execute("SELECT COUNT(*) FROM push_attempts").fetchone()[0] == 1)
+        check("删除错误条目清理待处理事件且不改其他新闻", repair_conn.execute("SELECT item_id FROM processing_events").fetchall() == []
+              and repair_conn.execute("SELECT stage FROM items WHERE id=2").fetchone()[0] == "processed")
+    repair_conn.close()
+    check("污染修复先备份且重复执行幂等", preview["item_ids"] == [1]
+          and (Path(result["backup"]) / "hx.sqlite3").is_file()
+          and repair_pollution(repair_db, apply=True, log=lambda text: None)["affected"] == 0)
 check("标题提示词要求每条都有标题且优先复用原题",
       '每条内容都必须有非空的 "title"' in llm.build_analysis_prompt("Starship")
       and "优先复用" in llm.build_analysis_prompt("Starship")
@@ -519,12 +564,12 @@ tdb_conn.execute("UPDATE items SET translate_error='HTTP 500 boom' WHERE id=2")
 tdb_conn.commit()
 
 picked = {r["id"] for r in tdb.pending_rows(tdb_conn, 3)}
-check("缺译文/灯/AI分/标题进入同一个完整分析队列", picked == {1, 4, 6, 7, 8}, sorted(picked))
+check("缺译文/灯/AI分/标题进入同一个完整分析队列", picked == {1, 3, 4, 6, 7, 8}, sorted(picked))
 check("增量处理只选订阅提供的 ID",
       {r["id"] for r in tdb.pending_rows(tdb_conn, 3, [6, 8])} == {6, 8})
 check("空增量不会退化成全库扫描", tdb.pending_rows(tdb_conn, 3, []) == [])
 check("完整记录不因旧错误重跑", 2 not in picked, sorted(picked))
-check("达到重试上限的不再翻", 3 not in picked, sorted(picked))
+check("累计失败达到旧上限仍会轮转重试", 3 in picked, sorted(picked))
 tdb_conn.execute("UPDATE items SET stage='collected' WHERE id=2")
 tdb_conn.commit()
 collected_complete = dict(tdb_conn.execute("SELECT * FROM items WHERE id=2").fetchone())
@@ -641,8 +686,9 @@ qconn = sqlite3.connect(qdb_file)
 cdb.ensure_schema(qconn)          # 真库的建表口径：pushed 列 + pushes 表都由它建
 for item_id, account, zh, decision in ((1, "SpaceX", "星舰", "发"), (2, "NASA", "月球", "发"),
                                        (3, "路人", "闲聊", "丢")):
-    qconn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score, stage)"
-                  " VALUES(?,?,?,?,?,?, 'processed')", (item_id, account, zh, "raw", decision, 80))
+    qconn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score, stage, ts)"
+                  " VALUES(?,?,?,?,?,?, 'processed', ?)",
+                  (item_id, account, zh, "raw", decision, 80, int(time.time())))
 qconn.commit()
 qconn.close()
 
@@ -669,8 +715,10 @@ gate_db = gate_case / "hx.sqlite3"
 gate_db.unlink(missing_ok=True)
 gate_conn = sqlite3.connect(gate_db)
 cdb.ensure_schema(gate_conn)
-gate_conn.execute("INSERT INTO items(id,raw,decision,stage) VALUES(1,'raw','发','judged')")
-gate_conn.execute("INSERT INTO items(id,raw,decision,stage) VALUES(2,'raw','发','processed')")
+gate_conn.execute("INSERT INTO items(id,raw,decision,stage,ts) VALUES(1,'raw','发','judged',?)",
+                  (int(time.time()),))
+gate_conn.execute("INSERT INTO items(id,raw,decision,stage,ts) VALUES(2,'raw','发','processed',?)",
+                  (int(time.time()),))
 gate_conn.commit()
 gate_conn.close()
 check("第三池隐藏尚未完成 AI 兜底的 judged 输出",
@@ -681,6 +729,22 @@ gate_conn.commit()
 gate_conn.close()
 check("第三池扫描到新完成的 processed 输出",
       [it["id"] for it in qdb.pending(db_file=gate_db)] == [1, 2])
+
+age_case = SANDBOX / "distribution_age_filter"
+age_case.mkdir(parents=True, exist_ok=True)
+age_db = age_case / "hx.sqlite3"
+age_db.unlink(missing_ok=True)
+age_conn = sqlite3.connect(age_db)
+cdb.ensure_schema(age_conn)
+age_now = int(time.time())
+for item_id, ts in ((1, age_now), (2, age_now - 5 * 24 * 60 * 60 - 1), (3, None)):
+    age_conn.execute("INSERT INTO items(id,decision,stage,ts) VALUES(?,'发','processed',?)",
+                     (item_id, ts))
+age_conn.commit()
+age_conn.close()
+check("所有渠道只读取最近 5 天且有发布时间的内容",
+      [it["id"] for it in qdb.pending(db_file=age_db)] == [1]
+      and qdb.pending_count(db_file=age_db) == 1)
 
 # 这一段只测注册/标记，先把"旧 JSON 迁移"的输入关掉，免得读到真实 data/queue/待推送.json
 _real_queue_files, _real_sent_files = qdb.LEGACY_QUEUE_FILES, qdb.LEGACY_SENT_FILES

@@ -19,6 +19,7 @@ import json
 import re
 
 import httpx
+import config as model_config
 
 from config import (
     ANTHROPIC_VERSION,
@@ -34,17 +35,29 @@ from config import (
 _openai_client = None
 
 
+def _refresh_config():
+    global _openai_client
+    if model_config.refresh_model_config():
+        for key in ("MODEL_API_BASE", "MODEL_API_KEY", "MODEL_NAME", "MODEL_PROTOCOL", "MODEL_TIMEOUT", "MODEL_MAX_TOKENS"):
+            globals()[key] = getattr(model_config, key)
+        if _openai_client is not None:
+            _openai_client.close()
+            _openai_client = None
+
+
 class OutputTruncated(RuntimeError):
     """模型输出被输出上限截断：译文/JSON 都不完整，不能当成功入库。"""
 
 
 def is_configured() -> bool:
     """必需项（base / name / key）是否都配好。没配就整段跳过，而不是给每条都记一次失败。"""
+    _refresh_config()
     return not missing_config()
 
 
 def config_summary() -> dict:
     """给日志用的安全摘要（不含 key）。"""
+    _refresh_config()
     return {
         "protocol": MODEL_PROTOCOL,
         "model": MODEL_NAME,
@@ -216,7 +229,8 @@ _BODY_RULES = """正文整合规则（适用于 zh / clean_zh）：
 """
 
 ANALYSIS_PROMPT = (
-    "你是航天内容处理助手。下面是一条 X（推特）推文原文，请一次完成下面这些事。\n"
+    "你是航天内容处理助手。下面是一条来源内容原文（推文或完整文章），请一次完成下面这些事。\n"
+    "只依据本条原文及实际提供的引用正文；来源账号、历史标题、格式说明都不是事实依据。信息不足时忠实翻译已有文字并判非新闻，不得补造任务、编号或结果。\n"
     "只输出一个 JSON 对象：不要 Markdown 代码块，不要任何解释、前后缀或多余文字。\n\n"
     "- \"zh\"：输出忠实、通顺的简体中文正文。合适的原文/译文表述直接保留；英文翻译成中文，专有名词可保留英文。\n"
     "  如果原文生硬、是直播状态或零散字段，整理成一条自然的新闻正文；保留主体、事实、数字和有意义的时间/地点，不得补造信息。\n"
@@ -228,11 +242,10 @@ ANALYSIS_PROMPT = (
     + _BODY_RULES + "\n"
     + _NEWS_RULES + "\n"
     + _TAG_RULES + "\n"
-    "输出格式（严格 JSON）：\n"
+    "输出格式（严格 JSON）：字符串仅说明字段含义，不是新闻示例；依据原文重新填写所有值，不得照抄占位内容。\n"
     '{"zh":"整理后的完整译文正文","quoted_zh":"被引用正文的译文（没有引用就给空串）",'
-    '"is_news":true,"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
-    '"title":"星舰第 11 次试飞成功","summary":"SpaceX 完成星舰第 11 次试飞，飞船再入后在海上溅落。",'
-    '"importance":"高","score":92,"tags":["领域:发射","对象:星舰","机构:SpaceX"]}\n\n'
+    '"is_news":false,"not_repeat":true,"repeat_of":"","not_comment":true,"not_sensitive":true,'
+    '"title":"依据本条原文生成的标题","summary":"","importance":"","score":0,"tags":["领域:其他"]}\n\n'
     "{known}{source}{quoted}原文：\n{raw}"
 )
 
@@ -535,6 +548,21 @@ def parse_analysis(output: str) -> dict:
     return result
 
 
+def validate_analysis_grounding(result: dict, text: str, quoted_raw: str = "") -> None:
+    """拦截已确认的示例污染；这是结果校验，不以关键词筛掉原文。"""
+    source = re.sub(r"https?://\S+", "", str(text or "") + "\n" + str(quoted_raw or ""))
+    output = "\n".join(str(result.get(key) or "") for key in ("zh", "quoted_zh", "title", "summary"))
+    starship = r"星[舰艦]|\bstar\s*ship\b"
+    if re.search(starship, output, re.I) and not re.search(starship + r"|\bship\s*\d{2,3}\b|スターシップ", source, re.I):
+        raise ValueError("CONTENT_UNGROUNDED：分析补造星舰主体，原文及引用正文未提供；请忠实翻译，不借用格式示例或历史清单")
+    flight11 = r"(?:第\s*(?:11|十一)\s*次\s*(?:试飞|飞行)|\bflight\s*[-#]?\s*11\b)"
+    source11 = flight11 + r"|\b(?:11th|eleventh)\s+(?:test\s+)?flight\b|\bflight\s+eleven\b|\bIFT\s*[-#]?\s*11\b|11回目"
+    if re.search(flight11, output, re.I) and not re.search(source11, source, re.I):
+        raise ValueError("CONTENT_UNGROUNDED：原文未提供第11次试飞编号，分析不得补造")
+    if result.get("title") == "依据本条原文生成的标题" or result.get("zh") == "整理后的完整译文正文":
+        raise ValueError("CONTENT_UNGROUNDED：分析照抄格式占位内容")
+
+
 def analyze_item(text: str, account: str = "", known_titles=None,
                  quoted_account: str = "", quoted_raw: str = "", repair_hint: str = "") -> dict:
     """一次调用拿齐：译文 + 四盏灯 + 标题/要点/重要度 + 标签。失败向上抛，由调用方记账重试。
@@ -559,6 +587,7 @@ def analyze_item(text: str, account: str = "", known_titles=None,
             '"title":"...","summary":"...","importance":"中","score":50,"tags":["领域:其他"]}。'
         )
     result = parse_analysis(chat(prompt, temperature=0.3))
+    validate_analysis_grounding(result, text, quoted_raw)
     if str(quoted_raw or "").strip() and not result["quoted_zh"]:
         raise ValueError("完整分析缺少引用译文")
     return result

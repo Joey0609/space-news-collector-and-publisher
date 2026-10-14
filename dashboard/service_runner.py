@@ -13,7 +13,9 @@ import sqlite3
 import subprocess
 import sys
 import time
+import math
 from pathlib import Path
+from datetime import datetime, timedelta
 
 if os.name == "nt":
     import msvcrt
@@ -37,11 +39,9 @@ COMMANDS = {
     "collect": [str(PROJECT_PYTHON), str(ROOT / "main_flow.py"), "--collect-only"],
     "process": [str(PROJECT_PYTHON), str(ROOT / "main_flow.py"), "--process-only"],
 }
-INTERVALS = {"collect": 600}
+INTERVALS = {"collect": 600, "web": 900}
 EVENT_POLL_SECONDS = 0.5
 EVENT_BATCH_SIZE = 200
-RETRY_BASE_SECONDS = 60
-RETRY_MAX_SECONDS = 3600
 
 
 def acquire_instance_lock(name: str):
@@ -65,7 +65,7 @@ def acquire_instance_lock(name: str):
 
 
 def configured_interval(name: str) -> int:
-    key = "COLLECT_INTERVAL_SECONDS"
+    key = "WEB_COLLECT_INTERVAL_SECONDS" if name == "web" else "COLLECT_INTERVAL_SECONDS"
     try:
         values = {}
         env_file = ROOT / ".env"
@@ -122,17 +122,13 @@ def read_processing_events(due_only=True, limit=EVENT_BATCH_SIZE):
         conn.close()
 
 
-def _max_attempts() -> int:
+def retry_cooldown() -> float:
+    from process.model_endpoints import read_env
     try:
-        values = {}
-        env_file = ROOT / ".env"
-        for line in env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []:
-            field, separator, value = line.partition("=")
-            if separator:
-                values[field.strip()] = value.strip()
-        return max(1, int(values.get("TRANSLATE_MAX_ATTEMPTS", "3")))
+        delay = float(read_env(ROOT / '.env').get('TRANSLATE_RATE_LIMIT_WAIT', '20'))
+        return max(1.0, delay) if math.isfinite(delay) else 20.0
     except (ValueError, OSError):
-        return 3
+        return 20.0
 
 
 def settle_processing_events(events, returncode: int) -> None:
@@ -140,6 +136,7 @@ def settle_processing_events(events, returncode: int) -> None:
     if not events:
         return
     item_ids = sorted({int(event["item_id"]) for event in events})
+    delay = retry_cooldown()
     conn = _event_connection()
     try:
         placeholders = ",".join("?" for _ in item_ids)
@@ -147,7 +144,6 @@ def settle_processing_events(events, returncode: int) -> None:
             f"SELECT * FROM items WHERE id IN ({placeholders})", item_ids).fetchall()
         by_id = {int(row["id"]): dict(row) for row in rows}
         from process.analysis_contract import missing_analysis_fields
-        max_attempts = _max_attempts()
         for event in events:
             item_id = int(event["item_id"])
             generation = int(event["generation"])
@@ -156,41 +152,120 @@ def settle_processing_events(events, returncode: int) -> None:
                 str(item.get("stage") or "") == "processed"
                 and not missing_analysis_fields(item)
             )
-            stuck = bool(item and missing_analysis_fields(item)
-                         and int(item.get("translate_attempts") or 0) >= max_attempts)
-            if returncode == 0 and (done or stuck):
+            if done:
                 conn.execute("DELETE FROM processing_events WHERE item_id=? AND generation=?",
                              (item_id, generation))
                 continue
-            delay = min(RETRY_BASE_SECONDS * (2 ** min(int(event.get("attempts") or 0), 6)),
-                        RETRY_MAX_SECONDS)
-            if returncode != 0:
-                delay = min(delay, RETRY_BASE_SECONDS)
+            # 到达本次尝试次数后移到队尾；短暂冷却避免队列只有失败项时空转。
+            latest = conn.execute("SELECT MAX(created_at) FROM processing_events").fetchone()[0]
+            tail = datetime.now()
+            if latest:
+                try:
+                    tail = max(tail, datetime.fromisoformat(latest) + timedelta(microseconds=1))
+                except ValueError:
+                    pass
             conn.execute(
-                "UPDATE processing_events SET available_at=?,attempts=attempts+1 "
+                "UPDATE processing_events SET available_at=?,attempts=attempts+1,created_at=? "
                 "WHERE item_id=? AND generation=?",
-                (time.time() + delay, item_id, generation),
+                (time.time() + delay, tail.isoformat(timespec='microseconds'), item_id, generation),
             )
         conn.commit()
     finally:
         conn.close()
 
 
-def run_processing_subscription() -> None:
-    """Run one startup repair scan, then consume only queued input revisions."""
+def restore_processing_events() -> None:
+    """启动时找回旧重试上限造成的漏项，不改变累计次数和原有事件版本。"""
     conn = _event_connection(initialize=True)
+    # 恢复旧逻辑已删除事件的失败项，以及离线导入的未完成项。
+    from collect.db import ensure_processing_event
+    from process.analysis_contract import processing_required
+    for row in conn.execute("SELECT * FROM items WHERE raw IS NOT NULL AND TRIM(raw)<>''").fetchall():
+        if processing_required(dict(row)):
+            ensure_processing_event(conn, row['id'])
+    conn.commit()
     conn.close()
+
+
+def run_processing_subscription() -> None:
+    """启动时恢复队列，之后只轮转持久事件，不周期性重扫全库。"""
+    restore_processing_events()
     print("[process] 启动时执行一次全库完整性扫描", flush=True)
-    result = run_command("process")
-    settle_processing_events(read_processing_events(due_only=False, limit=100000), result)
+    startup = read_processing_events(due_only=False, limit=100000)
+    if startup:
+        result = run_command("process", [event['item_id'] for event in startup])
+        settle_processing_events(startup, result)
     while True:
         events = read_processing_events(due_only=True)
         if not events:
             time.sleep(EVENT_POLL_SECONDS)
             continue
-        item_ids = sorted({int(event["item_id"]) for event in events})
+        item_ids = list(dict.fromkeys(int(event["item_id"]) for event in events))
         result = run_command("process", item_ids)
         settle_processing_events(events, result)
+
+
+def collection_groups(names=None):
+    """复用源选择配置；默认新来源全部启用，X 仍按用户原配置。"""
+    from collect.sources import enabled_sources
+    selected = [adapter.name for adapter in enabled_sources(names)]
+    groups = {}
+    if "x" in selected:
+        groups["x"] = ["x"]
+    web = [name for name in selected if name != "x"]
+    if web:
+        groups["web"] = web
+    return groups
+
+
+def next_collect_due(group, started, finished, interval):
+    """X 延续结束后等待；web 按开始时间计时，错过的轮次不补跑。"""
+    if group == "x":
+        return finished + interval
+    return started + (int(max(0, finished - started) // interval) + 1) * interval
+
+
+def run_collection_loops():
+    groups = collection_groups()
+    if not groups:
+        print("[collect] 没有启用的采集来源", flush=True)
+        return
+    due = {group: time.monotonic() for group in groups}
+    running = {}
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+    try:
+        while True:
+            now = time.monotonic()
+            for group, names in groups.items():
+                if group in running:
+                    process, started = running[group]
+                    code = process.poll()
+                    if code is None:
+                        continue
+                    print(f"[collect:{group}] 本轮结束，退出码 {code}", flush=True)
+                    interval = configured_interval("web" if group == "web" else "collect")
+                    due[group] = next_collect_due(group, started, now, interval)
+                    del running[group]
+                if now >= due[group]:
+                    command = list(COMMANDS["collect"]) + ["--sources", ",".join(names)]
+                    print(f"[collect:{group}] 开始一轮 {','.join(names)}", flush=True)
+                    try:
+                        running[group] = (subprocess.Popen(command, cwd=ROOT, env=env), now)
+                    except OSError as exc:
+                        print(f"[collect:{group}] 启动失败 {type(exc).__name__}", flush=True)
+                        due[group] = now + 60
+            time.sleep(0.25)
+    finally:
+        for process, _ in running.values():
+            if process.poll() is None:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True)
+                else:
+                    process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
 
 
 def main() -> None:
@@ -205,9 +280,7 @@ def main() -> None:
     if name == "process":
         run_processing_subscription()
         return
-    while True:
-        run_command(name)
-        time.sleep(configured_interval(name))
+    run_collection_loops()
 
 
 if __name__ == "__main__":

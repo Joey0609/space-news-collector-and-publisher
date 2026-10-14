@@ -22,8 +22,9 @@
 
 1. `collect.db.upsert_raw()` 在同一事务中写入新增/变化的原文，并发布到 `processing_events`。
 2. 处理服务等待到期事件，按事件里的 `item_id` 调用完整处理链；不会把全库查询作为后续增量入口。
-3. 成功完成的事件确认后删除；暂时失败的事件写入下次可处理时间并退避重试；达到完整分析重试上限的条目从事件队列移除，仍留在看板处理列表供查看。
+3. 成功完成的事件确认后删除；失败条目保留事件并移到队尾，没有累计重试上限。
 4. 事件按 item 合并并带 generation，处理过程中同一条内容再次变化时，新一代事件不会被旧处理结果确认掉。
+5. `TRANSLATE_MAX_ATTEMPTS` 是单条每次轮到时最多完整分析几次；仍失败先处理后续内容，队尾轮回来继续尝试。超时与格式错误都不永久放弃；失败项移到队尾时设置 `TRANSLATE_RATE_LIMIT_WAIT` 秒冷却（至少 1 秒），期间先处理其他到期事件。启动时找回旧版本因累计上限漏掉的事件，保留累计次数。
 
 `processing_events` 是持久订阅队列，因此处理服务重启时可以通过启动全库扫描恢复；在运行期间，新采集内容走事件增量。
 
@@ -77,7 +78,7 @@
 ### 1.3 推送规则（服务端）
 
 1. 收到 `hello` → `register_sources(通道的每个 target 一个 source)`；新 source 自动回填历史行。
-2. 从 `pending(source=...)` 取该渠道**未发送**的（`stage='processed' AND decision='发'` 且 `pushed[source] != true`），id 升序，
+2. 从 `pending(source=...)` 取该渠道**未发送**的（`stage='processed' AND decision='发'`、发布时间在最近 5 天内且 `pushed[source] != true`），id 升序，
    逐条推。**注册过还是新注册都一样**：都只推"确实没发过的"。
 3. 回执处理：
    - `result ok=true` → `mark_pushed([item_id], source)` → 回 `ack` → 推下一条。
@@ -118,7 +119,7 @@ HTTP 状态码仍有意义（200 / 400 / 401 / 404 / 500）。写操作要 `X-HX
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/state` | 首屏一次拿全：`services`、`process_progress`、`channels`、`stats`、`env_ready`、`configurable`、`ts` |
-| GET | `/api/process/backlog` | 全库完整性扫描得到的处理池条目：缺译文、四灯、有效 AI 分、标签、标题、正文清理、新闻要点/重要度或引用译文任一项，都要整条完整重做；含缺失项、尝试次数和重试上限状态 |
+| GET | `/api/process/backlog` | 完整处理池条目：含缺失项、累计尝试次数、每次轮到尝试次数；`stuck_count=0`，失败项持续轮转 |
 | GET | `/api/items?offset=&limit=` | 分页条目 |
 | GET | `/api/snapshot?offset=&limit=&since_id=&since_rev=` | 首屏/加载更多/增量补丁（`incremental` 标记） |
 | GET | `/api/pushes?limit=` | 最近分发尝试（`push_attempts`，含成功/失败与群名）；`pushes` 只保留成功审计 |
@@ -128,6 +129,9 @@ HTTP 状态码仍有意义（200 / 400 / 401 / 404 / 500）。写操作要 `X-HX
 | GET | `/api/image/<相对路径>` | 图片二进制（不变） |
 | GET | `/api/config/<service>` | `collect` / `process` 的配置字段（含 `env` 现值、字段提示） |
 | POST | `/api/config` | `{service, values}` 保存配置 |
+| GET | `/api/config/ai` | token 鉴权，返回接入点列表、`active_id`、配置 `version`；不返回密钥 |
+| POST | `/api/config/ai` | `{endpoints, version}` 保存列表与编辑；不改变当前使用项，空密钥保留原值 |
+| POST | `/api/config/ai/use` | `{endpoints, version, id}` 保存编辑并明确切换使用项；完整配置验证后原子写入 |
 | POST | `/api/service/toggle` | `{service, enabled}`，`service ∈ {collect, process}` |
 | POST | `/api/channels/toggle` | `{channel, enabled}`：`plugin` 渠道 = 启用/停用推送；`process` 渠道 = 真的启停进程 |
 | POST | `/api/item/update` | `{id, ...可改字段}` |
@@ -169,8 +173,33 @@ QQ 官方文档只提供[按 OpenID 获取指定群信息](https://bot.q.qq.com/
 - 顶部栏：标题 + **tab 切换**（`处理` / `分发`）+ 更新时间。
 - **处理** tab：
   - 第一行卡片：`采集服务`、`处理服务`、`运行摘要`（运行摘要顶替原来的"分发服务"卡片位置）。
-  - 处理卡片显示当前处理阶段/条目、剩余待处理数；点击剩余数弹出完整待处理列表，列出缺失灯/字段和重试上限。
+  - 处理卡片显示当前处理阶段/条目、剩余待处理数；点击剩余数弹出完整待处理列表，列出缺失灯/字段、累计次数和轮转重试状态。
   - 下面内容列表**占满 100% 宽度**（原来的右侧 OVERVIEW 栏取消，摘要已在上面）。
 - **分发** tab：渠道卡片（状态徽标、targets、待发、累计发送、最近活动、`启动/停止`、`配置`），
   下面"最近分发记录"表（`/api/pushes`）。
 - 详情 / 配置两个 `<dialog>` 保留原有交互（含 `i` 图标 tooltip、四盏灯、筛选、分页）。
+
+处理服务的配置入口分为 **AI 配置** 和 **处理配置**，分别打开独立弹窗。处理配置保留左右两栏字段；AI 配置左侧卡片点击仅切换编辑对象，左侧「使用此接入点」按钮才切换实际使用项。保存 AI 配置不隐式切换使用项，当前使用项禁止删除。
+
+所有弹窗点击遮罩、按 Esc 或点关闭按钮时：未修改直接关闭；有未保存修改则提供「保存并关闭 / 不保存 / 继续编辑」。保存失败保持弹窗和输入；AI 卡片选择、详情语言切换和 Alison 群目录刷新不算修改。保存期间不允许关闭；弹窗内开始拖选文字、结束于遮罩不触发关闭。
+
+多个接入点（含密钥）保存在不入库的根 `.env` 的 `MODEL_ENDPOINTS` JSON 中，`MODEL_ACTIVE_ENDPOINT` 指定使用项。未配置列表时读取原 `MODEL_*` 作为默认接入点，首次保存时迁移；旧配置不会丢失。写入使用原子替换，版本冲突拒绝覆盖，审计仅记录接入点 ID。AI 调用前检查配置变更，下一次请求使用新接入点，已发出的请求继续完成；处理参数在下一轮处理进程启动时读取。
+# 网页采集状态扩展（2026-10-14）
+
+`/api/state`、`/api/snapshot` 和 SSE 的状态新增可选 `collection`，兼容原有字段：
+
+```json
+{
+  "sources": [{"source":"rss:spacenews","label":"SpaceNews","last_run":0,"state":"ok","discovered":0,"collected":0}],
+  "warnings": [{"source":"snapi","url":"https://example.org/article","stage":"fulltext","error_type":"BODY_NOT_FOUND","detail":"未取得完整正文","updated_at":0}],
+  "failed_count": 0
+}
+```
+
+此处 `source` 是采集来源键，不是渠道投递 source。失败候选不写入 `items`，不计入处理池或待发队列。看板只读采集账本；`warnings` 返回最近 50 条当前告警，详细采集日志仍写入 `logs/`。
+
+`collection.sources` 固定包含清单内全部 21 个网页来源，未运行的来源也返回，另保留账本中未知来源。每行新增 `type`、`url`、`started_at`、`stored_count`（当前主库本来源条数）、`total_collected`（账本已成功候选数）、`pending_count`、`failed_count`、`warning_count`、`last_error`。`state` 为 `never`（尚未采集）、`running`（采集中）、`ok`、`warning`、`error` 或 `interrupted`（上次采集进程已退出且未完成）。`last_run` 是最近采集进度更新时间；`discovered` 和 `collected` 分别表示本轮新增候选、本轮入库数量，采集中随候选登记和成功入库实时增长，失败收尾保留已完成的计数。正文失败和待采集分开统计，尚未运行不显示为失败。
+
+采集配置增加 `WEB_COLLECT_INTERVAL_SECONDS`（默认 900，整数秒且至少 10）和 `SOURCES`（`x,rss,snapi,sina` 子集，空为全部）。web 与 X 独立调度，仍由一个“采集”服务统一启停；修改 SOURCES 后重启采集服务。采集启动仍需要手动操作，渠道协议和发送回执规则不变。
+
+历史候选或已入库数据存在、但没有完整轮次状态时返回 `unrecorded`（状态待确认）。账本读取失败仍返回全部来源，状态为 `error`，未知数量返回 `null`，前端显示“—”，不伪报为零。

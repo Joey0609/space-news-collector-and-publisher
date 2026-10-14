@@ -1,0 +1,7 @@
+# 使用根目录 .venv 安装；不引入 ASN 的另一套服务、AI 或调度框架。
+httpx>=0.27,<1
+beautifulsoup4>=4.12,<5
+python-dotenv>=1,<2
+twscrape
+openai
+websockets

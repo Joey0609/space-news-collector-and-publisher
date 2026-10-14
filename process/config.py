@@ -15,6 +15,10 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+try:
+    from process.model_endpoints import read_settings
+except ModuleNotFoundError:
+    from model_endpoints import read_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / '.env', encoding='utf-8')
@@ -46,6 +50,32 @@ MODEL_MAX_TOKENS = int(_env('MODEL_MAX_TOKENS') or 0)
 ANTHROPIC_VERSION = _env('ANTHROPIC_VERSION') or '2023-06-01'
 
 
+_model_stamp = None
+
+
+def refresh_model_config() -> bool:
+    """每次 AI 请求前检查 .env；已发出的请求不受切换影响。"""
+    global _model_stamp, MODEL_API_BASE, MODEL_NAME, MODEL_API_KEY
+    global MODEL_PROTOCOL, MODEL_TIMEOUT, MODEL_MAX_TOKENS
+    path = ROOT / '.env'
+    stamp = (path.stat().st_mtime_ns, path.stat().st_size) if path.exists() else (0, 0)
+    if stamp == _model_stamp:
+        return False
+    endpoints, active = read_settings(path)
+    row = next(item for item in endpoints if item['id'] == active)
+    MODEL_API_BASE = row['MODEL_API_BASE'].rstrip('/')
+    MODEL_NAME = row['MODEL_NAME']
+    MODEL_API_KEY = row['MODEL_API_KEY']
+    MODEL_PROTOCOL = row['MODEL_PROTOCOL']
+    MODEL_TIMEOUT = float(row['MODEL_TIMEOUT'])
+    MODEL_MAX_TOKENS = int(row['MODEL_MAX_TOKENS'])
+    _model_stamp = stamp
+    return True
+
+
+refresh_model_config()
+
+
 def missing_config() -> list:
     """列出还没配的必需项，给日志/报错用（不含 key 的值）。"""
     missing = []
@@ -59,11 +89,11 @@ def missing_config() -> list:
 
 
 # ---- 翻译 ----
-# 每轮开始时会把"没翻译过 / 翻译失败"的条目补齐；失败的单条最多重试这么多次。
+# 每次轮到一条最多完整分析这么多次；仍失败移到队尾，累计次数不限。
 TRANSLATE_MAX_ATTEMPTS = int(_env('TRANSLATE_MAX_ATTEMPTS') or 3)
 TRANSLATE_PAUSE_SECONDS = float(_env('TRANSLATE_PAUSE_SECONDS') or 0.5)
 # 免费/共享模型经常 429（该模型访问量过大）或超时，这类"临时失败"当场等一会儿重试，
-# 且不消耗上面的重试次数，避免把整批条目一次性判死。
+# 属于一次完整分析中的请求重试；次数用完则轮转到后续内容，累计失败不判死。
 TRANSLATE_INLINE_RETRIES = int(_env('TRANSLATE_INLINE_RETRIES') or 2)
 TRANSLATE_RATE_LIMIT_WAIT = float(_env('TRANSLATE_RATE_LIMIT_WAIT') or 20)
 

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import importlib
+import asyncio
 import pkgutil
 from pathlib import Path
 from typing import Callable, Iterable
@@ -71,7 +72,7 @@ def enabled_sources(names: Iterable[str] | None = None) -> list:
     if names is None:
         from collect.env import ENABLED_SOURCES
         names = ENABLED_SOURCES
-    wanted = [str(n).strip() for n in (names or []) if str(n).strip()]
+    wanted = list(dict.fromkeys(str(n).strip() for n in (names or []) if str(n).strip()))
     if not wanted:
         return all_sources()
 
@@ -97,20 +98,22 @@ async def collect_all(log: Callable[[str], None] = print, names: Iterable[str] |
         return []
 
     log(f"[源] 本轮启用 {len(sources)} 个源：{[str(getattr(s, 'name', '?')) for s in sources]}")
-    items: list[dict] = []
-    for adapter in sources:
+    async def run(adapter):
         name = str(getattr(adapter, "name", "?"))
         log(f"[源] {name} 开始采集")
         try:
             result = await adapter.collect(log)
         except Exception as exc:                       # noqa: BLE001
             log(f"[源] {name} 异常：{exc}")
-            continue
+            return []
         extra = f"，失败 {result.failed}" if result.failed else ""
         extra += "，疑似限流" if result.rate_limited else ""
         log(f"[源] {name} 结束：新增 {len(result.items)} 条{extra}"
             + (f"，错误：{result.error}" if result.error else ""))
-        items.extend(result.items)
+        return result.items
+
+    results = await asyncio.gather(*(run(adapter) for adapter in sources))
+    items = [item for result in results for item in result]
 
     log(f"[源] 全部结束，合计新增 {len(items)} 条")
     return items

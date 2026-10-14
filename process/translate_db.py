@@ -3,8 +3,8 @@
 每条内容只有一个处理队列。缺译文、四灯、AI分、标题、标签或正文清理项时，都重新调用同一个完整分析：
 译文 zh / 四盏灯 / AI 价值分 / ai_title / 摘要 / 重要度 / 标签一次生成并校验齐全后才落库。
 
-分析失败不会把灰灯当成功；逐条记录错误与尝试次数，达到上限的记录仍留在看板列表中。
-临时网络错误与限流不消耗永久失败次数。
+分析失败不会把灰灯当成功；每次轮到一条最多尝试配置次数，仍失败就回到队尾。
+累计次数仅用于记录，不会永久放弃条目。
 judge.py 只处理完整分析成功写入 translated 的记录。"""
 import json
 import os
@@ -116,7 +116,7 @@ def _normalize_item_ids(item_ids):
 
 
 def pending_rows(conn, max_attempts: int, item_ids=None) -> list[dict]:
-    """选出指定增量或全库中缺少完整分析字段且未达重试上限的记录。"""
+    """选出缺少完整分析字段的记录；累计次数不再阻断重试。"""
     ids = _normalize_item_ids(item_ids)
     if ids == []:
         return []
@@ -130,25 +130,17 @@ def pending_rows(conn, max_attempts: int, item_ids=None) -> list[dict]:
     for row in rows:
         item = dict(row)
         item["attempts"] = int(item.get("translate_attempts") or 0)
-        if missing_analysis_fields(item) and item["attempts"] < max_attempts:
+        if missing_analysis_fields(item):
             picked.append(item)
+    if ids is not None:
+        order = {ident: index for index, ident in enumerate(ids)}
+        picked.sort(key=lambda item: order[item["id"]])
     return picked
 
 
 def stuck_count(conn, max_attempts: int, item_ids=None) -> int:
-    """失败次数已用完、被放弃的条目数（用来提示用户改配置或手工处理）。"""
-    ids = _normalize_item_ids(item_ids)
-    if ids == []:
-        return 0
-    sql = "SELECT * FROM items WHERE raw IS NOT NULL AND TRIM(raw) <> ''"
-    args = []
-    if ids is not None:
-        sql += " AND id IN (" + ",".join("?" for _ in ids) + ")"
-        args.extend(ids)
-    rows = conn.execute(sql, args).fetchall()
-    return sum(1 for row in rows
-               if missing_analysis_fields(dict(row))
-               and int(row["translate_attempts"] or 0) >= max_attempts)
+    """兼容旧统计入口：新队列不会永久放弃条目。"""
+    return 0
 
 
 def promote_complete_collected(conn, item_ids=None) -> int:
@@ -273,9 +265,9 @@ def save_ok(conn, item: dict, analysis: dict, attempts: int) -> bool:
 
 
 def save_failed(conn, item: dict, error: Exception, attempts: int) -> None:
-    """翻译的永久性失败：记错误并消耗一次重试机会。"""
+    """记下失败和累计尝试次数，等待队列再次轮到该条目。"""
     conn.execute(
-        "UPDATE items SET translate_error=?, translate_attempts=? "
+        "UPDATE items SET translate_error=?, translate_attempts=?, rev=COALESCE(rev,0)+1 "
         "WHERE id=? AND raw IS ? AND quoted_raw IS ? AND quoted_account IS ? AND account IS ?",
         (one_line(str(error)), attempts, item["id"], item.get("raw"),
          item.get("quoted_raw"), item.get("quoted_account"), item.get("account")),
@@ -336,33 +328,36 @@ def translate_pass(conn, item_ids=None) -> tuple[int, int, int, bool]:
     if promoted:
         log(f"[扫描] {promoted} 条已有完整分析的采集记录进入判定阶段")
     todo = pending_rows(conn, TRANSLATE_MAX_ATTEMPTS, item_ids)
-    stuck = stuck_count(conn, TRANSLATE_MAX_ATTEMPTS, item_ids)
     for item in todo:
         ensure_processing_event(conn, item["id"])
     conn.commit()
     if not todo:
         log("[检查] 没有待翻译/待重试的条目")
-        if stuck:
-            log(f"[提示] 另有 {stuck} 条翻译连续失败已达上限 {TRANSLATE_MAX_ATTEMPTS} 次，已跳过")
         return 0, 0, 0, False
 
-    log(f"[检查] 待翻译 {len(todo)} 条（含失败重试；单条上限 {TRANSLATE_MAX_ATTEMPTS} 次）")
+    log(f"[检查] 待翻译 {len(todo)} 条（每次轮到最多尝试 {TRANSLATE_MAX_ATTEMPTS} 次，失败移到队尾继续循环）")
 
     ok = failed = transient_left = 0
     for index, item in enumerate(todo, 1):
         write_progress(True, "正在翻译并判灯", item, index, len(todo))
-        attempts = int(item["attempts"]) + 1
+        attempts = int(item["attempts"])
         tag = f"{index}/{len(todo)}"
-
-        analysis, error, auth_failed = analyze_with_retry(
-            str(item["raw"]), tag, str(item.get("account") or ""),
-            known_titles(conn, item["id"], AI_REPEAT_CONTEXT),
-            str(item.get("quoted_account") or ""), str(item.get("quoted_raw") or ""))
-
-        if auth_failed:
-            # key 不对是配置问题：整轮停下，绝不把 71 条的重试次数一次烧光
-            log(f"[中止] 认证失败 HTTP {status_code_of(error)}：请检查 MODEL_API_KEY 是否正确")
-            return ok, failed, transient_left, True
+        for visit_attempt in range(max(1, TRANSLATE_MAX_ATTEMPTS)):
+            attempts += 1
+            analysis, error, auth_failed = analyze_with_retry(
+                str(item["raw"]), tag, str(item.get("account") or ""),
+                known_titles(conn, item["id"], AI_REPEAT_CONTEXT),
+                str(item.get("quoted_account") or ""), str(item.get("quoted_raw") or ""))
+            if analysis:
+                break
+            save_failed(conn, item, error, attempts)
+            conn.commit()
+            # 认证问题无需在当前条目反复请求，保留事件，继续其他条目。
+            if auth_failed:
+                log(f"[认证失败] {tag} HTTP {status_code_of(error)}：请检查当前接入点密钥；条目保留重试")
+                break
+            if visit_attempt + 1 < max(1, TRANSLATE_MAX_ATTEMPTS) and TRANSLATE_PAUSE_SECONDS > 0:
+                time.sleep(TRANSLATE_PAUSE_SECONDS)
 
         if analysis:
             saved = save_ok(conn, item, analysis, attempts)
@@ -382,16 +377,11 @@ def translate_pass(conn, item_ids=None) -> tuple[int, int, int, bool]:
                 log(f"[引用OK {tag}] @{item['account']} 引用 @{item.get('quoted_account') or '?'} "
                     f"的译文 | {one_line(quoted_zh)}")
         elif is_transient(error):
-            # 限流/超时：记下原因但不消耗次数，下一轮继续
-            save_transient(conn, item, error)
-            conn.commit()
             transient_left += 1
-            log(f"[限流] {tag} @{item['account']} {one_line(str(error))}")
+            log(f"[队尾重试] {tag} @{item['account']} 累计{attempts}次：{one_line(str(error))}")
         else:
-            save_failed(conn, item, error, attempts)
-            conn.commit()
             failed += 1
-            log(f"[翻译X  {tag}] @{item['account']} 第{attempts}次失败: {one_line(str(error))}")
+            log(f"[队尾重试] {tag} @{item['account']} 累计{attempts}次：{one_line(str(error))}")
 
         if TRANSLATE_PAUSE_SECONDS > 0:
             time.sleep(TRANSLATE_PAUSE_SECONDS)
@@ -436,17 +426,16 @@ def _run_processing(item_ids=None) -> int:
         try:
             promoted = promote_complete_collected(conn, item_ids)
             todo = pending_rows(conn, TRANSLATE_MAX_ATTEMPTS, item_ids)
-            stuck = stuck_count(conn, TRANSLATE_MAX_ATTEMPTS, item_ids)
             for item in todo:
                 ensure_processing_event(conn, item["id"])
             conn.commit()
             scope = "指定增量" if item_ids is not None else "全库"
             log(f"[扫描] {scope}检查完成：待完整分析 {len(todo)} 条，完整采集转入判定 {promoted} 条，"
-                f"达到重试上限 {stuck} 条")
+                "失败条目将持续循环重试")
         finally:
             conn.close()
         log(f"[等待] 模型 API 未配置完整，缺少：{'、'.join(missing_config())}；不完整条目保留在订阅队列")
-        log("       配置入口：看板 → 处理服务 → 配置（MODEL_API_KEY / MODEL_API_BASE / MODEL_NAME）")
+        log("       配置入口：看板 → 处理服务 → AI 配置（API 密钥 / API 地址 / 模型名称）")
         # Keep already-complete rows moving through judge/fallback. Incomplete rows
         # remain on the durable subscription and will retry after their backoff.
         return 0
@@ -458,15 +447,12 @@ def _run_processing(item_ids=None) -> int:
             log(f"[结果] 已中止：成功 {ok} 条，失败 {failed} 条（认证问题不消耗重试次数）")
             log("       填好 key 后重新启动处理服务即可继续")
             return 1
-        log(f"[结果] 完整分析：成功 {ok} 条，永久失败 {failed} 条，限流待重试 {transient_left} 条")
+        log(f"[结果] 完整分析：成功 {ok} 条，失败待轮转 {failed} 条，超时/限流待轮转 {transient_left} 条")
         if failed:
             log("[提示] 不完整回复或翻译失败已记 translate_error，下一轮会自动重试")
         if transient_left:
-            log(f"[提示] 限流/超时的条目没有消耗重试次数，下一轮会继续（本次已等待重试 "
+            log(f"[提示] 限流/超时的条目会回到队尾继续（单次请求最多额外重试 "
                 f"{TRANSLATE_INLINE_RETRIES} 次）")
-        left = stuck_count(conn, TRANSLATE_MAX_ATTEMPTS)
-        if left:
-            log(f"[提示] {left} 条完整分析达到重试上限；看板队列会保留并显示错误")
     finally:
         conn.close()
 

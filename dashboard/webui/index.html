@@ -41,7 +41,8 @@
                         </div>
                     </div>
                     <div class="actions"><button data-service="process">启动</button><button class="secondary"
-                            data-config="process">配置</button></div>
+                            data-config="ai">AI 配置</button><button class="secondary"
+                            data-config="process">处理配置</button></div>
                     <div class="process-progress">
                         <div class="process-progress__label">当前进度</div>
                         <p id="process-progress-current" aria-live="polite">处理服务尚未运行</p>
@@ -65,6 +66,14 @@
                     <div id="channel-brief" class="channel-brief"></div>
                 </article>
             </section>
+            <section class="panel collection-panel" aria-label="新增来源采集状态">
+                <details open class="collection-collapse">
+                    <summary class="panel-title"><h2>网页来源采集</h2><span id="collection-count" class="count">尚未采集</span></summary>
+                    <p class="collection-help">逐个查看网页来源。本轮入库只计成功取得完整正文的新闻；已有文章不会重复计数。</p>
+                    <div id="collection-sources" class="collection-table-wrap" tabindex="0" role="region" aria-label="各网页来源状态和采集数量"></div>
+                    <details class="collection-details"><summary>采集告警（缺正文不会进入新闻列表）</summary><div id="collection-warnings" aria-live="polite"></div></details>
+                </details>
+            </section>
             <section class="panel content">
                 <div class="panel-title">
                     <div><span class="eyebrow">CONTENT</span>
@@ -77,6 +86,14 @@
                     <button data-filter="red">红灯拦截</button>
                     <button data-filter="unknown">未点灯</button>
                     <button data-filter="send">判定=发</button>
+                </div>
+                <div class="content-tools">
+                    <label class="content-search"><span>搜索全部内容</span><input id="item-search" type="search" placeholder="搜索原文、译文、标题、摘要等" autocomplete="off"></label>
+                    <label class="content-sort"><span>排序</span><select id="item-sort">
+                        <option value="published">信息发布时间倒序</option>
+                        <option value="collected">信息获取时间倒序</option>
+                        <option value="processed">信息处理时间倒序</option>
+                    </select></label>
                 </div>
                 <div id="items"></div>
                 <div class="list-foot">
@@ -161,7 +178,30 @@
         </header>
         <div id="process-backlog-list" class="process-backlog-list" aria-live="polite"></div>
     </dialog>
-    <dialog id="config-dialog">
+    <dialog id="ai-dialog" aria-labelledby="ai-title">
+        <div class="dialog-head">
+            <div><span class="eyebrow">AI SETTINGS</span><h2 id="ai-title">AI 配置</h2>
+                <p>管理接入点与当前使用的模型</p></div>
+            <button type="button" id="ai-close" class="close" aria-label="关闭 AI 配置">×</button>
+        </div>
+        <div class="ai-layout">
+            <aside class="ai-sidebar" aria-label="AI 接入点">
+                <h3>AI 接入点 <span id="ai-count" class="ai-count"></span></h3>
+                <div id="ai-list"></div>
+                <button type="button" id="ai-add" class="secondary">＋ 添加接入点</button>
+            </aside>
+            <section class="ai-editor" aria-label="接入点配置">
+                <div class="ai-editor-head"><h3>接入点配置</h3><div class="actions">
+                    <button type="button" id="ai-copy" class="secondary">复制</button>
+                    <button type="button" id="ai-delete" class="secondary">删除</button></div></div>
+                <div id="ai-fields" class="config-fields"></div>
+            </section>
+        </div>
+        <div class="dialog-actions"><span id="ai-current" class="ai-current"></span>
+            <button type="button" id="ai-cancel" class="secondary">取消</button>
+            <button type="button" id="ai-save">保存 AI 配置</button></div>
+    </dialog>
+    <dialog id="config-dialog" aria-labelledby="config-title">
         <div class="detail-head">
             <div><span class="eyebrow">SERVICE SETTINGS</span>
                 <h2 id="config-title">服务配置</h2>
@@ -201,6 +241,12 @@
                 </section>
             </div>
         </div>
+    </dialog>
+    <dialog id="unsaved-dialog" aria-labelledby="unsaved-title" aria-describedby="unsaved-message">
+        <div class="dialog-head"><div><span class="eyebrow">UNSAVED CHANGES</span>
+            <h2 id="unsaved-title">是否保存修改？</h2><p id="unsaved-message">此弹窗有未保存的修改。</p></div></div>
+        <div class="dialog-actions"><button id="unsaved-cancel" class="secondary">继续编辑</button>
+            <button id="unsaved-discard" class="secondary">不保存</button><button id="unsaved-save">保存并关闭</button></div>
     </dialog>
     <script src="/app.js"></script>
 </body>

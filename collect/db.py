@@ -39,6 +39,7 @@ def ensure_schema(c):
  _ensure_columns(c)
  c.execute('CREATE INDEX IF NOT EXISTS items_distribution_pool_idx ON items(stage,decision,id)')
  c.execute('CREATE INDEX IF NOT EXISTS processing_events_due_idx ON processing_events(available_at,item_id)')
+ c.execute('CREATE INDEX IF NOT EXISTS processing_events_queue_idx ON processing_events(created_at,item_id)')
  c.commit()
 
 def open_db():
@@ -50,7 +51,7 @@ def ensure_processing_event(c, item_id: int) -> None:
  c.execute(
   "INSERT OR IGNORE INTO processing_events(item_id,generation,created_at,available_at,attempts) "
   "VALUES(?,1,?,0,0)",
-  (int(item_id), datetime.now().isoformat(timespec='seconds')),
+  (int(item_id), datetime.now().isoformat(timespec='microseconds')),
  )
 
 
@@ -60,7 +61,7 @@ def enqueue_processing_event(c, item_id: int) -> None:
   "INSERT INTO processing_events(item_id,generation,created_at,available_at,attempts) "
   "VALUES(?,1,?,0,0) ON CONFLICT(item_id) DO UPDATE SET "
   "generation=processing_events.generation+1,created_at=excluded.created_at,available_at=0,attempts=0",
-  (int(item_id), datetime.now().isoformat(timespec='seconds')),
+  (int(item_id), datetime.now().isoformat(timespec='microseconds')),
  )
 
 

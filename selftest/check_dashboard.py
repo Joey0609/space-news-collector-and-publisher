@@ -318,14 +318,14 @@ def test_process_backlog():
 
         result = server.process_backlog()
         assert result["remaining_count"] == 5, result
-        assert result["ready_count"] == 4 and result["stuck_count"] == 1, result
+        assert result["ready_count"] == 5 and result["stuck_count"] == 0, result
         by_id = {item["id"]: item for item in result["items"]}
         assert "重复" in by_id[1]["missing"] and by_id[1]["phase"] == "待完整分析" and by_id[1]["attempts"] == 1, by_id[1]
-        assert by_id[3]["stuck"] and "AI分" in by_id[3]["missing"], by_id[3]
+        assert not by_id[3]["stuck"] and "AI分" in by_id[3]["missing"], by_id[3]
         assert by_id[4]["phase"] == "待完整分析", by_id[4]
         assert "要点" in by_id[5]["missing"] and "引用译文" in by_id[6]["missing"], result
         summary = server.process_backlog(include_items=False)
-        assert summary == {"items": [], "remaining_count": 5, "ready_count": 4, "stuck_count": 1}, summary
+        assert summary == {"items": [], "remaining_count": 5, "ready_count": 5, "stuck_count": 0}, summary
     finally:
         server.DATA = original_data
         server._max_process_attempts = original_attempts

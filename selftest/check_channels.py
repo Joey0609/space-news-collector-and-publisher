@@ -92,8 +92,9 @@ conn = sqlite3.connect(DB)
 cdb.ensure_schema(conn)
 for item_id, account, zh in ((1, "SpaceX", "星舰第十次试飞成功"), (2, "NASA", "月球轨道站进展"),
                              (3, "路人", "今天天气不错")):
-    conn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score, stage)"
-                 " VALUES(?,?,?,?,'发',80,'processed')", (item_id, account, zh, f"raw-{item_id}"))
+    conn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score, stage, ts)"
+                 " VALUES(?,?,?,?,'发',80,'processed',?)",
+                 (item_id, account, zh, f"raw-{item_id}", int(time.time())))
 conn.execute("UPDATE items SET decision='丢' WHERE id=3")
 conn.commit()
 conn.close()
@@ -127,8 +128,9 @@ def scalar(sql, args=()):
 
 def add_item(item_id: int, account: str, zh: str, score: int = 70, stage: str = "processed"):
     conn = sqlite3.connect(DB)
-    conn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score, stage)"
-                 " VALUES(?,?,?,?,'发',?,?)", (item_id, account, zh, f"raw-{item_id}", score, stage))
+    conn.execute("INSERT INTO items(id, account, zh, raw, decision, ai_score, stage, ts)"
+                 " VALUES(?,?,?,?,'发',?,?,?)",
+                 (item_id, account, zh, f"raw-{item_id}", score, stage, int(time.time())))
     conn.commit()
     conn.close()
 

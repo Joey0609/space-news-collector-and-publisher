@@ -11,11 +11,15 @@ let latestRev = 0;
 let loaded = false;
 let lastState = {};
 let itemTotal = 0;      // 库里的总条数（stats.item_count / 拍平的 item_count 都算）
+let resultTotal = 0;    // 当前搜索词命中的条数
 let channels = [];
 let configurable = ["collect", "process"];
 
 const hints = {
-  PROXY_URL: "X 访问代理地址，可留空。",
+  PROXY_URL: "X 与网页来源访问代理地址，可留空。",
+  COLLECT_INTERVAL_SECONDS: "X 每轮结束后的等待秒数，保留现有配置。",
+  WEB_COLLECT_INTERVAL_SECONDS: "网页来源独立刷新间隔，默认 900 秒（15 分钟）。",
+  SOURCES: "启用的采集器，逗号分隔：x,rss,snapi,sina；留空全部启用。修改后重启采集服务。",
   COOKIES_PATH: "X cookies 文件路径。",
   WATCH_ACCOUNT: "关注列表账号。",
   NEWS_ACCOUNTS: "直接扫描账号，逗号分隔。",
@@ -28,9 +32,10 @@ const hints = {
   MODEL_TIMEOUT: "单次请求超时秒数。",
   MODEL_MAX_TOKENS: "单次输出上限；0 = 不显式限制（交给服务端默认）。译文+标签是 JSON，上限太小会被截断。",
   AI_REPEAT_CONTEXT: "判「不重复」那盏灯时，给模型对比的最近已入库标题条数；0 = 不给清单（只看文本里的旧闻线索）。",
-  TRANSLATE_MAX_ATTEMPTS: "永久失败的单条最多重试次数（每轮自动补翻未翻译/失败的条目）。",
+  TRANSLATE_MAX_ATTEMPTS: "每次轮到一条内容时最多完整分析几次；仍失败就移到队尾，下次轮到继续，没有累计重试上限。",
   TRANSLATE_INLINE_RETRIES: "遇到限流/超时时，同一轮内当场重试几次。",
   TRANSLATE_RATE_LIMIT_WAIT: "限流/超时后等待多少秒再重试。",
+  TRANSLATE_PAUSE_SECONDS: "每条内容处理完成后的等待秒数，0 表示不主动等待。",
 };
 
 const protocolLabels = {
@@ -127,9 +132,10 @@ function reportError(error, fallback = "操作失败") {
    注意别用 <label> 包这颗按钮：label 会把点击转发给包着的按钮，点字段名也会弹提示。 */
 function fieldLabel(key, hint) {
   const hasHint = Boolean(hint);
+  const label = ({WEB_COLLECT_INTERVAL_SECONDS: "网页刷新间隔（秒）", COLLECT_INTERVAL_SECONDS: "X 等待间隔（秒）", SOURCES: "启用来源"})[key] || key;
   return `
       <div class="field-head">
-        <span class="field-name">${esc(key)}</span>
+        <span class="field-name">${esc(label)}</span>
         ${hasHint ? `<button type="button" class="hint-toggle" data-tip="${esc(hint)}"
           aria-expanded="false" aria-label="${esc(key)}：${esc(hint)}">i</button>` : ""}
       </div>`;
@@ -448,6 +454,7 @@ function setConnection(ok) {
 function applyState(data) {
   if (!data || typeof data !== "object") return;
   mergeState(data);
+  if (data.collection) renderCollection(data.collection);
 
   if (data.services) renderServices(data.services);
   if (data.process_progress) renderProcessProgress(data.process_progress);
@@ -470,6 +477,41 @@ function applyState(data) {
   if (incomingTotal !== null || incomingPending !== null) renderCounters(data);
   if (data.env_ready !== undefined) renderEnv(data.env_ready);
   renderTimestamp(data.ts);
+}
+
+function renderCollection(data) {
+  const count = $("#collection-count"), sources = $("#collection-sources"), warnings = $("#collection-warnings");
+  if (!count || !sources || !warnings) return;
+  const rows = Array.isArray(data.sources) ? data.sources : [];
+  const num = value => Math.max(0, Number(value) || 0);
+  const cellNum = value => value == null ? "—" : num(value);
+  const running = rows.filter(row => row.state === "running").length;
+  const issues = rows.filter(row => ["warning", "error", "interrupted"].includes(row.state)).length;
+  const total = rows.reduce((sum, row) => sum + num(row.stored_count), 0);
+  count.textContent = `${rows.length} 个来源 · 采集中 ${running} · 异常 ${issues} · 库内 ${rows.every(row => row.stored_count != null) ? total : "—"} 条`;
+  const labels = { never: "尚未采集", unrecorded: "状态待确认", running: "采集中", ok: "正常", warning: "有告警", error: "采集失败", interrupted: "已中断" };
+  sources.innerHTML = `<table class="collection-table"><caption class="sr-only">网页来源采集状态与数量</caption><thead><tr>
+    <th scope="col">来源</th><th scope="col">状态</th><th scope="col" class="collection-number">本轮入库</th>
+    <th scope="col" class="collection-number">库内总数</th><th scope="col" class="collection-number">待采集</th>
+    <th scope="col" class="collection-number">失败待重试</th><th scope="col">最近采集</th></tr></thead><tbody>${rows.map(row => {
+      const state = Object.hasOwn(labels, row.state) ? row.state : "never";
+      const error = row.last_error;
+      const errorText = error ? [error.error_type, error.detail].filter(Boolean).join("：") : "";
+      const note = state === "interrupted" ? "上次采集未完成，可重新启动采集服务" : state === "unrecorded" ? `已有历史采集数据，未记录完整轮次状态${errorText ? `；最近告警：${errorText}` : ""}` : errorText;
+      const recent = num(row.last_run) ? new Date(num(row.last_run) * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : "—";
+      const title = /^https?:\/\//i.test(row.url || "")
+        ? `<a href="${esc(row.url)}" target="_blank" rel="noopener noreferrer">${esc(row.label || row.source)}</a>` : esc(row.label || row.source);
+      return `<tr data-source="${esc(row.source)}"><th scope="row"><span class="collection-type">${esc(row.type || "网页")}</span>${title}</th>
+        <td><span class="collection-status collection-status--${state}">${labels[state]}</span>${error && state === "unrecorded" ? `<span class="collection-status collection-status--warning">有告警</span>` : ""}${note ? `<small class="collection-error" title="${esc(note)}">${esc(note)}</small>` : ""}</td>
+        <td class="collection-number collection-added">${cellNum(row.collected)}</td><td class="collection-number">${cellNum(row.stored_count)}</td>
+        <td class="collection-number">${cellNum(row.pending_count)}</td><td class="collection-number${num(row.failed_count) ? " collection-failed" : ""}">${cellNum(row.failed_count)}</td>
+        <td class="collection-time">${esc(recent)}</td></tr>`;
+    }).join("")}</tbody></table>`;
+  warnings.innerHTML = (Array.isArray(data.warnings) ? data.warnings : []).map(row => {
+    const url = String(row.url || ""), link = /^https?:\/\//i.test(url)
+      ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>` : esc(url);
+    return `<div class="collection-warning"><b>WARNING · ${esc(row.source)} · ${esc(row.error_type)}</b><p>${link}</p><p>${esc(row.detail)} · ${esc(row.stage)}</p></div>`;
+  }).join("") || "暂无采集 WARNING";
 }
 function renderServices(services) {
   for (const name of ["collect", "process"]) {
@@ -503,16 +545,16 @@ function renderProcessProgress(progress) {
   }
   remaining.textContent = String(progress.remaining_count || 0);
   const stuck = Number(progress.stuck_count || 0);
-  countButton.title = stuck ? `${stuck} 条已达到自动重试上限` : "点击查看所有待处理内容";
+  countButton.title = "点击查看所有待处理内容；失败项持续轮转重试";
   countButton.classList.toggle("has-stuck", stuck > 0);
-  countButton.setAttribute("aria-label", `剩余 ${progress.remaining_count || 0} 条，点击查看列表${stuck ? `，其中 ${stuck} 条达到重试上限` : ""}`);
+  countButton.setAttribute("aria-label", `剩余 ${progress.remaining_count || 0} 条，点击查看列表，失败项持续轮转重试`);
 }
 
 function renderProcessBacklog(data) {
   const items = Array.isArray(data?.items) ? data.items : [];
   const list = $("#process-backlog-list");
   const summary = $("#process-backlog-summary");
-  summary.textContent = `剩余 ${data?.remaining_count || 0} 条 · 可自动处理 ${data?.ready_count || 0} 条 · 达到重试上限 ${data?.stuck_count || 0} 条`;
+  summary.textContent = `剩余 ${data?.remaining_count || 0} 条 · 失败项移到队尾，持续循环重试`;
   if (!items.length) {
     list.innerHTML = '<p class="process-backlog-empty">当前没有待处理内容。</p>';
     return;
@@ -520,11 +562,11 @@ function renderProcessBacklog(data) {
   list.innerHTML = items.map((item) => {
     const title = item.title || String(item.raw || "").replace(/\s+/g, " ").slice(0, 100) || "（无正文）";
     const missing = item.missing?.length ? `缺少：${item.missing.join("、")}` : "译文待完成";
-    const status = item.stuck ? "达到重试上限" : (item.error ? "失败待重试" : "等待处理");
+    const status = item.error ? "失败待轮转重试" : "等待处理";
     const origin = item.origin_id ? ` · X:${item.origin_id}` : "";
     return `<article class="process-backlog-item ${item.stuck ? "is-stuck" : ""}">
       <div class="process-backlog-item__head"><strong>#${esc(item.id)} · ${esc(title)}</strong><span>${esc(status)}</span></div>
-      <div class="process-backlog-item__meta">@${esc(item.account)} · ${esc(item.phase)} · ${esc(item.stage || "")} · ${esc(missing)} · 尝试 ${esc(item.attempts)}/${esc(item.max_attempts)}${esc(origin)}</div>
+      <div class="process-backlog-item__meta">@${esc(item.account)} · ${esc(item.phase)} · ${esc(item.stage || "")} · ${esc(missing)} · 累计尝试 ${esc(item.attempts)} 次 · 每次轮到最多 ${esc(item.max_attempts)} 次${esc(origin)}</div>
       ${item.error ? `<p class="process-backlog-item__error">${esc(item.error)}</p>` : ""}
     </article>`;
   }).join("");
@@ -546,7 +588,7 @@ function renderConfigButtons() {
   const list = Array.isArray(configurable) ? configurable : [];
   for (const button of $$("[data-config]")) {
     const name = button.dataset.config;
-    const can = list.includes(name);
+    const can = list.includes(name === "ai" ? "process" : name);
     button.hidden = !can;
     button.disabled = !can;
   }
@@ -787,6 +829,19 @@ const MAX_WINDOW = 300;      // 定时核对一次最多比对多少条，避免
 let shownCount = 0;          // 当前列表里"应该显示"的条数
 let hasMore = false;
 let loadingMore = false;
+let listRequestVersion = 0;
+
+function listQuery() {
+  return {
+    q: String($("#item-search")?.value || "").trim(),
+    sort: String($("#item-sort")?.value || "published"),
+  };
+}
+
+function listUrl(path, params = {}) {
+  const query = new URLSearchParams({ ...listQuery(), ...params });
+  return `${path}?${query}`;
+}
 
 function elementOf(key) {
   for (const element of $("#items").children) {
@@ -879,20 +934,42 @@ function refreshItem(item) {
 function updateListStatus() {
   const status = $("#list-status");
   if (!status) return;
-  status.textContent = `已显示 ${shownCount} / 共 ${itemTotal} 条`;
+  status.textContent = `已显示 ${shownCount} / 共 ${resultTotal} 条`;
   const more = $("#load-more");
   if (more) more.hidden = !hasMore;
 }
 
+function refreshListQuery() {
+  listRequestVersion += 1;
+  loaded = false;
+  shownCount = 0;
+  resultTotal = 0;
+  hasMore = false;
+  cache.clear();
+  $("#items").replaceChildren();
+  updateListStatus();
+  loadAll();
+}
+
+let itemSearchTimer = 0;
+$("#item-search")?.addEventListener("input", () => {
+  clearTimeout(itemSearchTimer);
+  itemSearchTimer = setTimeout(refreshListQuery, 300);
+});
+$("#item-sort")?.addEventListener("change", refreshListQuery);
+
 async function loadAll() {
+  const requestVersion = ++listRequestVersion;
   try {
-    const data = await apiGet(`/api/snapshot?offset=0&limit=${PAGE_SIZE}`);
+    const data = await apiGet(listUrl("/api/snapshot", { offset: 0, limit: PAGE_SIZE }));
+    if (requestVersion !== listRequestVersion) return;
     applyState(data);
     replaceItems(data.items || []);
     latestId = Math.max(latestId, Number(statValue(data, "latest_id", 0)));
     latestRev = Math.max(latestRev, Number(statValue(data, "latest_rev", 0)));
     shownCount = (data.items || []).length;
-    hasMore = data.has_more !== undefined ? Boolean(data.has_more) : shownCount < itemTotal;
+    resultTotal = Number(data.result_total ?? itemTotal);
+    hasMore = data.has_more !== undefined ? Boolean(data.has_more) : shownCount < resultTotal;
     loaded = true;
     updateListStatus();
     setConnection(true);
@@ -906,17 +983,17 @@ async function loadAll() {
 async function loadMore() {
   if (!loaded || !hasMore || loadingMore) return;
   loadingMore = true;
+  const requestVersion = listRequestVersion;
   const more = $("#load-more");
   if (more) more.textContent = "加载中…";
   try {
-    const data = await apiGet(`/api/items?offset=${shownCount}&limit=${PAGE_SIZE}`);
+    const data = await apiGet(listUrl("/api/items", { offset: shownCount, limit: PAGE_SIZE }));
+    if (requestVersion !== listRequestVersion) return;
     const items = data.items || [];
     appendItems(items);
     shownCount += items.length;
-    const total = data.total !== undefined && data.total !== null
-      ? Number(data.total)
-      : itemTotal;
-    hasMore = items.length >= PAGE_SIZE && shownCount < total;
+    resultTotal = data.total !== undefined && data.total !== null ? Number(data.total) : resultTotal;
+    hasMore = items.length >= PAGE_SIZE && shownCount < resultTotal;
     applyFilter();
   } catch (error) {
     notify(`加载更多失败：${error.message}`, "error");
@@ -944,9 +1021,12 @@ function maybeLoadMore() {
 /* 实时补丁：SSE 说"有新条目或老条目被改过"时拉一次。 */
 async function pullChanges() {
   if (!loaded) return 0;
+  const query = listQuery();
+  if (query.q || query.sort !== "published") return reconcile();
   try {
     const data = await apiGet(`/api/snapshot?since_id=${latestId}&since_rev=${latestRev}`);
     applyState(data);
+    resultTotal = Number(data.result_total ?? itemTotal);
     const items = data.items || [];
     const touched = items.length ? upsertItems(items) : 0;
     latestId = Math.max(latestId, Number(statValue(data, "latest_id", 0)));
@@ -964,8 +1044,9 @@ async function reconcile() {
   if (!loaded) return;
   const limit = Math.min(Math.max(shownCount, PAGE_SIZE), MAX_WINDOW);
   try {
-    const data = await apiGet(`/api/snapshot?offset=0&limit=${limit}`);
+    const data = await apiGet(listUrl("/api/snapshot", { offset: 0, limit }));
     applyState(data);
+    resultTotal = Number(data.result_total ?? itemTotal);
     const items = data.items || [];
     const keys = items.map(keyOf);
     const domKeys = [...$("#items").children].map((element) => element.dataset.key);
@@ -991,7 +1072,7 @@ async function reconcile() {
     }
     latestId = Math.max(latestId, Number(statValue(data, "latest_id", 0)));
     latestRev = Math.max(latestRev, Number(statValue(data, "latest_rev", 0)));
-    hasMore = shownCount < itemTotal;
+    hasMore = shownCount < resultTotal;
     updateListStatus();
   } catch (error) {
     /* 下一轮再试 */
@@ -1055,6 +1136,7 @@ function openDetail(key) {
     .join("");
 
   $("#detail-dialog").querySelector(".detail-scroll").scrollTop = 0;
+  markDialogClean($("#detail-dialog"));
   $("#detail-dialog").showModal();
 }
 
@@ -1157,7 +1239,7 @@ function renderConfigFields(data) {
 
   $("#config-fields").innerHTML = fields.map((field) => `
     <div class="config-field">
-      ${fieldLabel(field.key, hints[field.key] || field.hint || "")}
+      ${fieldLabel(activeConfig === "process" ? PROCESS_LABELS[field.key] || field.key : field.key, hints[field.key] || field.hint || "")}
       ${fieldControl(field)}
     </div>
   `).join("") + cookieField;
@@ -1175,11 +1257,13 @@ function renderConfigFields(data) {
 }
 
 async function openConfig(name) {
+  if (name === "ai") return openAIConfig();
   activeConfig = name;
-  $("#config-title").textContent = `${SERVICE_LABELS[name] || name}服务配置`;
+  $("#config-title").textContent = name === "process" ? "处理配置" : `${SERVICE_LABELS[name] || name}服务配置`;
   try {
     const data = await apiGet(`/api/config/${encodeURIComponent(name)}`);
     renderConfigFields(data || {});
+    markDialogClean($("#config-dialog"));
   } catch (error) {
     return reportError(error, "配置读取失败");
   }
@@ -1190,7 +1274,7 @@ async function saveConfig() {
   if (!activeConfig) return;
   const values = {};
   document.querySelectorAll("#config-fields [data-key]").forEach((field) => {
-    if (field.value.trim()) values[field.dataset.key] = field.value.trim();
+    if (field.value.trim() || field.dataset.key === "SOURCES") values[field.dataset.key] = field.value.trim();
   });
   const cookieContent = $("#cookie-content")?.value.trim() || "";
 
@@ -1204,6 +1288,102 @@ async function saveConfig() {
   }
   notify("配置已保存", "ok");
   $("#config-dialog").close();
+}
+
+/* AI 接入点：编辑对象与使用对象独立；只有左侧“使用此接入点”才提交切换。 */
+const PROCESS_LABELS = {
+  AI_REPEAT_CONTEXT: "去重参考条数", TRANSLATE_MAX_ATTEMPTS: "单条每轮尝试次数",
+  TRANSLATE_INLINE_RETRIES: "单次请求重试次数", TRANSLATE_RATE_LIMIT_WAIT: "限流等待（秒）",
+  TRANSLATE_PAUSE_SECONDS: "处理间隔（秒）",
+};
+const AI_LABELS = {
+  name: "接入点名称", MODEL_PROTOCOL: "接口协议", MODEL_API_BASE: "API 地址",
+  MODEL_NAME: "模型名称", MODEL_API_KEY: "API 密钥", MODEL_TIMEOUT: "请求超时（秒）",
+  MODEL_MAX_TOKENS: "最大输出 Token",
+};
+let aiSettings = null;
+let aiSelected = "";
+let aiBusy = false;
+
+function captureAIFields() {
+  const row = aiSettings?.endpoints.find(item => item.id === aiSelected);
+  if (!row) return;
+  $$("#ai-fields [data-key]").forEach(input => { row[input.dataset.key] = input.value; });
+}
+
+function renderAIConfig() {
+  const row = aiSettings.endpoints.find(item => item.id === aiSelected);
+  $("#ai-count").textContent = aiSettings.endpoints.length;
+  $("#ai-list").innerHTML = aiSettings.endpoints.map(item => `
+    <div class="ai-card ${item.id === aiSelected ? "selected" : ""}">
+      <button type="button" class="ai-select" data-ai-select="${esc(item.id)}" aria-pressed="${item.id === aiSelected}">
+        <span class="ai-card-title">${esc(item.name || "未命名接入点")}</span>
+        ${item.id === aiSettings.active_id ? '<span class="ai-active">当前使用</span>' : ""}
+        <span class="ai-card-model">${esc(item.MODEL_NAME || "待配置")}</span>
+      </button>
+      <button type="button" class="secondary ai-use" data-ai-use="${esc(item.id)}" ${item.id === aiSettings.active_id ? "disabled" : ""}>
+        ${item.id === aiSettings.active_id ? "正在使用" : "使用此接入点"}
+      </button>
+    </div>`).join("");
+  $("#ai-fields").innerHTML = Object.entries(AI_LABELS).map(([key, label]) => `
+    <div class="config-field ${["MODEL_API_BASE", "MODEL_NAME", "MODEL_API_KEY"].includes(key) ? "ai-wide" : ""}">
+      ${fieldLabel(label, hints[key] || "")}
+      ${fieldControl({key, value: row[key] || "", secret: key === "MODEL_API_KEY", choices: key === "MODEL_PROTOCOL" ? ["openai", "responses", "anthropic"] : []})}
+      ${key === "MODEL_API_KEY" ? `<small>${row.key_configured ? "已配置，留空则保留原密钥" : "请填写此接入点的 API 密钥"}</small>` : ""}
+    </div>`).join("");
+  // 未保存的密钥只保存在当前编辑会话，切换卡片后也不能丢失。
+  $("#ai-fields [data-key='MODEL_API_KEY']").value = row.MODEL_API_KEY || "";
+  $("#ai-delete").disabled = row.id === aiSettings.active_id || aiSettings.endpoints.length === 1;
+  const active = aiSettings.endpoints.find(item => item.id === aiSettings.active_id);
+  $("#ai-current").textContent = `当前使用：${active?.name || ""}`;
+}
+
+async function openAIConfig() {
+  try { aiSettings = await apiGet("/api/config/ai"); }
+  catch (error) { return reportError(error, "AI 配置读取失败"); }
+  aiSelected = aiSettings.active_id;
+  renderAIConfig();
+  markDialogClean($("#ai-dialog"));
+  $("#ai-dialog").showModal();
+}
+
+function addAIEndpoint(copy = false) {
+  if (aiBusy) return;
+  captureAIFields();
+  const source = aiSettings.endpoints.find(item => item.id === aiSelected);
+  const row = copy ? {...source, name: `${source.name} 副本`, copy_from: source.copy_from || source.id} : {
+    name: "新接入点", MODEL_PROTOCOL: "openai", MODEL_API_BASE: "", MODEL_NAME: "",
+    MODEL_API_KEY: "", MODEL_TIMEOUT: "90", MODEL_MAX_TOKENS: "0", key_configured: false,
+  };
+  row.id = crypto.randomUUID();
+  aiSettings.endpoints.push(row);
+  aiSelected = row.id;
+  renderAIConfig();
+  $("#ai-fields [data-key='name']").focus();
+}
+
+async function saveAIConfig(useId = "") {
+  if (aiBusy) return;
+  captureAIFields();
+  aiBusy = true;
+  const controls = $$("#ai-dialog button, #ai-dialog input, #ai-dialog select");
+  const disabled = controls.map(control => control.disabled);
+  controls.forEach(control => { control.disabled = true; });
+  try {
+    aiSettings = await apiPost(useId ? "/api/config/ai/use" : "/api/config/ai", {
+      endpoints: aiSettings.endpoints, version: aiSettings.version, ...(useId ? {id: useId} : {}),
+    });
+    renderAIConfig();
+    markDialogClean($("#ai-dialog"));
+    if (useId) notify("已切换使用的接入点，下一次 AI 请求生效", "ok");
+    else { notify("AI 配置已保存", "ok"); $("#ai-dialog").close(); }
+  } catch (error) { reportError(error, useId ? "接入点切换失败" : "AI 配置保存失败"); }
+  finally {
+    aiBusy = false;
+    controls.forEach((control, index) => { control.disabled = disabled[index]; });
+    // 使用成功后编辑卡片可能已成为当前项，不能恢复成切换前的删除按钮状态。
+    $("#ai-delete").disabled = aiSelected === aiSettings.active_id || aiSettings.endpoints.length === 1;
+  }
 }
 
 /* ── 艾莉森 QQ Bot：独立配置弹窗；刷新时绝不重绘正在编辑的表单 ── */
@@ -1350,6 +1530,8 @@ async function openAlison() {
     const data = await apiGet("/api/config/alison");
     if (session !== alisonSession || !dialog.open) return;
     fillAlisonFields(data?.fields);
+    $("#alison-group-openid").value = "";
+    markDialogClean(dialog);
     renderAlisonGroups(data?.groups);
     $("#alison-content").hidden = false;
     alisonStatus("#alison-load-state", "");
@@ -1380,28 +1562,14 @@ function closeAlison() {
     if (dialog.open) dialog.close();
   }, 160);
 }
-$("#alison-dialog").addEventListener("cancel", (event) => {
-  event.preventDefault();
-  closeAlison();
-});
 $("#alison-dialog").addEventListener("close", () => {
   $("#alison-dialog").classList.remove("is-closing");
   ++alisonSession;
   stopAlisonPoll();
 });
-$("#alison-dialog").addEventListener("mousedown", event => {
-  if (event.target === event.currentTarget) event.currentTarget.dataset.backdropPress = "1";
-});
-$("#alison-dialog").addEventListener("click", event => {
-  const dialog = event.currentTarget;
-  if (event.target === dialog && dialog.dataset.backdropPress === "1") closeAlison();
-  delete dialog.dataset.backdropPress;
-});
-
-$("#alison-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  if (alisonBusy || alisonLoading) return;
-  const form = event.currentTarget;
+async function saveAlisonSettings() {
+  if (alisonBusy || alisonLoading) return false;
+  const form = $("#alison-form");
   const values = {};
   for (const key of ALISON_KEYS) {
     const control = form.elements.namedItem(key);
@@ -1413,20 +1581,27 @@ $("#alison-form").addEventListener("submit", async event => {
   alisonStatus("#alison-save-state", "正在保存…");
   try {
     await apiPost("/api/config/alison", { values });
-    if (session === alisonSession) alisonStatus("#alison-save-state", "配置已保存");
+    if (session === alisonSession) {
+      alisonStatus("#alison-save-state", "配置已保存");
+      markDialogPartClean($("#alison-dialog"), "settings");
+    }
+    return true;
   } catch (_) {
     if (session === alisonSession) alisonStatus("#alison-save-state", "保存失败，请重试。", true);
+    return false;
   } finally {
     alisonBusy = false;
     $("#alison-save").disabled = false;
   }
+}
+$("#alison-form").addEventListener("submit", event => {
+  event.preventDefault(); saveDialogWithLock($("#alison-dialog"), saveAlisonSettings);
 });
 
-$("#alison-add-form").addEventListener("submit", async event => {
-  event.preventDefault();
+async function saveAlisonGroup() {
   const input = $("#alison-group-openid");
   const group_openid = input.value.trim();
-  if (!group_openid || $("#alison-add").disabled) return;
+  if (!group_openid || $("#alison-add").disabled) return false;
   const session = alisonSession;
   $("#alison-add").disabled = true;
   alisonStatus("#alison-add-state", "正在添加…");
@@ -1444,10 +1619,16 @@ $("#alison-add-form").addEventListener("submit", async event => {
       }
     }
     input.value = "";
+    markDialogPartClean($("#alison-dialog"), "group");
     alisonStatus("#alison-add-state", "群已添加");
+    return true;
   } catch (_) {
     if (session === alisonSession) alisonStatus("#alison-add-state", "添加失败，请检查 OpenID 后重试。", true);
+    return false;
   } finally { $("#alison-add").disabled = false; }
+}
+$("#alison-add-form").addEventListener("submit", event => {
+  event.preventDefault(); saveDialogWithLock($("#alison-dialog"), saveAlisonGroup);
 });
 
 $("#alison-groups-list").addEventListener("change", async event => {
@@ -1494,6 +1675,128 @@ $("#alison-refresh").addEventListener("click", async () => {
   }
 });
 
+/* 所有弹窗统一关闭入口：无改动直接关闭，有改动可保存、放弃或继续编辑。 */
+const dialogBaselines = new WeakMap();
+let pendingDialogClose = null;
+let closeSaveBusy = false;
+
+function dialogSnapshot(dialog) {
+  if (dialog.id === "ai-dialog") {
+    captureAIFields();
+    return {endpoints: aiSettings?.endpoints || [], active: aiSettings?.active_id};
+  }
+  if (dialog.id === "config-dialog") return {
+    fields: $$("#config-fields [data-key]").map(control => [control.dataset.key, control.value]),
+    cookies: $("#cookie-content")?.value || "",
+  };
+  if (dialog.id === "detail-dialog") return {translation: $("#detail-edit").value};
+  if (dialog.id === "alison-dialog") return {
+    settings: ALISON_KEYS.map(key => {
+      const input = $("#alison-form").elements.namedItem(key);
+      return [key, input.type === "checkbox" ? input.checked : input.value];
+    }), group: $("#alison-group-openid").value,
+  };
+  return {};
+}
+
+function markDialogClean(dialog) { dialogBaselines.set(dialog, JSON.stringify(dialogSnapshot(dialog))); }
+function markDialogPartClean(dialog, key) {
+  const before = JSON.parse(dialogBaselines.get(dialog) || "{}");
+  before[key] = dialogSnapshot(dialog)[key];
+  dialogBaselines.set(dialog, JSON.stringify(before));
+}
+function dialogIsDirty(dialog) {
+  return dialogBaselines.has(dialog) && dialogBaselines.get(dialog) !== JSON.stringify(dialogSnapshot(dialog));
+}
+function dialogIsBusy(dialog) {
+  return dialog.dataset.saving === "1" || (dialog.id === "ai-dialog" && aiBusy) ||
+    (dialog.id === "alison-dialog" && (alisonBusy || alisonGroupBusy.size || $("#alison-add").disabled));
+}
+function finishDialogClose(dialog) {
+  hideHintTip();
+  if (dialog.id === "alison-dialog") closeAlison();
+  else dialog.close();
+}
+function requestDialogClose(dialog) {
+  if (!dialog.open || dialogIsBusy(dialog) || closeSaveBusy) return;
+  if (dialog.id === "unsaved-dialog") {
+    pendingDialogClose = null;
+    dialog.close();
+    return;
+  }
+  if (!dialogIsDirty(dialog)) return finishDialogClose(dialog);
+  if ($("#unsaved-dialog").open) return;
+  pendingDialogClose = dialog;
+  $("#unsaved-message").textContent = "此弹窗有未保存的修改，是否保存后关闭？";
+  $("#unsaved-dialog").showModal();
+  $("#unsaved-cancel").focus();
+}
+
+async function saveDialogWithLock(dialog, action) {
+  if (dialogIsBusy(dialog)) return false;
+  const controls = Array.from(dialog.querySelectorAll("input, select, textarea, button"));
+  const disabled = controls.map(control => control.disabled);
+  // 设置锁但不禁用提交按钮：Alison 的既有保存函数会检查按钮是否可用。
+  dialog.dataset.saving = "1";
+  controls.filter(control => control.matches("input,select,textarea")).forEach(control => { control.disabled = true; });
+  try { return await action(); }
+  finally { delete dialog.dataset.saving; controls.forEach((control, i) => { control.disabled = disabled[i]; }); }
+}
+
+async function savePendingDialog() {
+  const dialog = pendingDialogClose;
+  if (!dialog || closeSaveBusy || dialogIsBusy(dialog)) return;
+  closeSaveBusy = true;
+  $$("#unsaved-dialog button").forEach(button => { button.disabled = true; });
+  try {
+    await saveDialogWithLock(dialog, async () => {
+      if (dialog.id === "ai-dialog") return saveAIConfig();
+      if (dialog.id === "config-dialog") return saveConfig();
+      if (dialog.id === "detail-dialog") return saveDetail();
+      if (dialog.id === "alison-dialog") {
+        const before = JSON.parse(dialogBaselines.get(dialog) || "{}");
+        const current = dialogSnapshot(dialog);
+        if (JSON.stringify(before.settings) !== JSON.stringify(current.settings) && !await saveAlisonSettings()) return;
+        if (current.group.trim() && !await saveAlisonGroup()) return;
+        if (!dialogIsDirty(dialog)) finishDialogClose(dialog);
+      }
+    });
+    if (!dialog.open || !dialogIsDirty(dialog)) {
+      $("#unsaved-dialog").close();
+      pendingDialogClose = null;
+    } else $("#unsaved-message").textContent = "保存未完成，请检查配置后重试，或返回继续编辑。";
+  } finally {
+    closeSaveBusy = false;
+    $$("#unsaved-dialog button").forEach(button => { button.disabled = false; });
+  }
+}
+
+for (const dialog of $$("dialog")) {
+  const outside = event => {
+    const rect = dialog.getBoundingClientRect();
+    return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+  };
+  dialog.addEventListener("pointerdown", event => {
+    dialog.dataset.backdropPress = event.target === dialog && outside(event) ? "1" : "0";
+  });
+  dialog.addEventListener("click", event => {
+    const pressed = dialog.dataset.backdropPress === "1";
+    delete dialog.dataset.backdropPress;
+    // 在弹窗内开始拖选文字、结束于遮罩时不能触发关闭。
+    if (pressed && event.target === dialog && outside(event)) requestDialogClose(dialog);
+  });
+  dialog.addEventListener("cancel", event => { event.preventDefault(); requestDialogClose(dialog); });
+}
+$("#unsaved-cancel").addEventListener("click", () => requestDialogClose($("#unsaved-dialog")));
+$("#unsaved-discard").addEventListener("click", () => {
+  if (closeSaveBusy) return;
+  const dialog = pendingDialogClose;
+  pendingDialogClose = null;
+  $("#unsaved-dialog").close();
+  if (dialog) finishDialogClose(dialog);
+});
+$("#unsaved-save").addEventListener("click", savePendingDialog);
+
 /* ── 事件委托 ── */
 document.addEventListener("click", (event) => {
   const detailDialog = $("#detail-dialog");
@@ -1511,7 +1814,7 @@ document.addEventListener("click", (event) => {
 
   const channelConfigButton = event.target.closest("[data-channel-config='alison']");
   if (channelConfigButton) openAlison();
-  if (event.target.id === "alison-close") closeAlison();
+  if (event.target.id === "alison-close") requestDialogClose($("#alison-dialog"));
 
   const channelButton = event.target.closest("[data-channel-toggle]");
   if (channelButton) toggleChannel(channelButton.getAttribute("data-channel-toggle"));
@@ -1524,6 +1827,19 @@ document.addEventListener("click", (event) => {
 
   const configButton = event.target.closest("[data-config]");
   if (configButton) openConfig(configButton.dataset.config);
+  const aiSelect = event.target.closest("[data-ai-select]");
+  if (aiSelect && !aiBusy) { captureAIFields(); aiSelected = aiSelect.dataset.aiSelect; renderAIConfig(); }
+  const aiUse = event.target.closest("[data-ai-use]");
+  if (aiUse && !aiUse.disabled) saveAIConfig(aiUse.dataset.aiUse);
+  if (event.target.id === "ai-add") addAIEndpoint();
+  if (event.target.id === "ai-copy") addAIEndpoint(true);
+  if (event.target.id === "ai-delete" && !aiBusy && !event.target.disabled) {
+    aiSettings.endpoints = aiSettings.endpoints.filter(item => item.id !== aiSelected);
+    aiSelected = aiSettings.active_id;
+    renderAIConfig();
+  }
+  if (event.target.id === "ai-save") saveAIConfig();
+  if (["ai-close", "ai-cancel"].includes(event.target.id)) requestDialogClose($("#ai-dialog"));
 
   const filterButton = event.target.closest("[data-filter]");
   if (filterButton) {
@@ -1540,28 +1856,16 @@ document.addEventListener("click", (event) => {
     hideHintTip();
   }
 
-  if (event.target.id === "detail-close") detailDialog.close();
+  if (event.target.id === "detail-close") requestDialogClose(detailDialog);
   if (event.target.id === "process-backlog-open") openProcessBacklog();
   if (event.target.id === "process-backlog-close") $("#process-backlog-dialog").close();
-  if (event.target.id === "detail-save") saveDetail();
-  if (event.target.id === "detail-delete") deleteDetail();
-  if (event.target.id === "config-close" || event.target.id === "config-cancel") $("#config-dialog").close();
-  if (event.target.id === "config-save") saveConfig();
+  if (event.target.id === "detail-save") saveDialogWithLock(detailDialog, saveDetail);
+  if (event.target.id === "detail-delete" && !dialogIsBusy(detailDialog)) deleteDetail();
+  if (event.target.id === "config-close" || event.target.id === "config-cancel") requestDialogClose($("#config-dialog"));
+  if (event.target.id === "config-save") saveDialogWithLock($("#config-dialog"), saveConfig);
   if (event.target.id === "load-more") loadMore();
   if (event.target.id === "pushes-refresh") loadPushes();
 
-  // Click on the backdrop (the <dialog> element itself is the outside area)
-  // closes the read-only detail view. Tracked from mouseup so that a text
-  // selection drag started inside the panel cannot close it by accident.
-  if (event.target === detailDialog && detailDialog.dataset.backdropPress === "1") {
-    detailDialog.close();
-  }
-  delete detailDialog.dataset.backdropPress;
-});
-
-document.addEventListener("mousedown", (event) => {
-  const detailDialog = $("#detail-dialog");
-  if (event.target === detailDialog) detailDialog.dataset.backdropPress = "1";
 });
 
 /* 说明浮层：滚动/改窗口大小跟着重新定位，Esc 或点别处关闭 */

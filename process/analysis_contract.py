@@ -83,4 +83,4 @@ def processing_required(item: dict) -> bool:
     A collected row with complete imported analysis still needs the normal
     judge/fallback stages, so it must be promoted into the processing chain.
     """
-    return bool(missing_analysis_fields(item)) or str(item.get("stage") or "collected") == "collected"
+    return bool(missing_analysis_fields(item)) or str(item.get("stage") or "collected") != "processed"

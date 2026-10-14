@@ -5,6 +5,7 @@
 
 ```
 items.stage = 'processed' AND items.decision = '发'  ← 完整处理结束且最终判定要发
+items.ts >= 当前时间 - 5 天                       ← 所有渠道共用的发布时间筛选
 items.pushed   = {"<source>": true}    ← 我这个 source 发过没有（服务端写，渠道不碰库）
 pushes                                 ← 每次成功发送的审计（source/item_id/sent_at）
 ```
@@ -21,6 +22,7 @@ pushes                                 ← 每次成功发送的审计（source/
 - **只有 `result ok=true` 才会写库**（`pushed` 置 true + `pushes` 记时间 + `rev` +1）；
   `ok=false` / `defer` / 回执超时 → 条目保持未发，退避后重试。**失败千万别报成功**，否则内容就丢了。
 - 粒度到"目标"而不是"通道"：私聊发过不会把群的那份也标成已发。
+- 推送模式与拉取模式共用同一待发查询，只分发发布时间在最近 5 天内且发布时间有效的内容。
 
 ## 代码位置
 
