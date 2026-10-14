@@ -47,6 +47,8 @@ MODEL_TIMEOUT = float(_env('MODEL_TIMEOUT') or 90)
 # 单次输出上限：0 = 不显式传，交给服务端默认（避免某些模型/网关不接受 max_tokens）。
 # Anthropic 协议必填，为 0 时用 4096 兜底。
 MODEL_MAX_TOKENS = int(_env('MODEL_MAX_TOKENS') or 0)
+ANALYSIS_PAUSE_SECONDS = float(_env('ANALYSIS_PAUSE_SECONDS') or 0.5)
+ANALYSIS_CONCURRENCY = 1
 ANTHROPIC_VERSION = _env('ANTHROPIC_VERSION') or '2023-06-01'
 
 
@@ -57,6 +59,7 @@ def refresh_model_config() -> bool:
     """每次 AI 请求前检查 .env；已发出的请求不受切换影响。"""
     global _model_stamp, MODEL_API_BASE, MODEL_NAME, MODEL_API_KEY
     global MODEL_PROTOCOL, MODEL_TIMEOUT, MODEL_MAX_TOKENS
+    global ANALYSIS_PAUSE_SECONDS, ANALYSIS_CONCURRENCY
     path = ROOT / '.env'
     stamp = (path.stat().st_mtime_ns, path.stat().st_size) if path.exists() else (0, 0)
     if stamp == _model_stamp:
@@ -69,6 +72,8 @@ def refresh_model_config() -> bool:
     MODEL_PROTOCOL = row['MODEL_PROTOCOL']
     MODEL_TIMEOUT = float(row['MODEL_TIMEOUT'])
     MODEL_MAX_TOKENS = int(row['MODEL_MAX_TOKENS'])
+    ANALYSIS_PAUSE_SECONDS = float(row['ANALYSIS_PAUSE_SECONDS'])
+    ANALYSIS_CONCURRENCY = int(row['ANALYSIS_CONCURRENCY'])
     _model_stamp = stamp
     return True
 
@@ -91,7 +96,6 @@ def missing_config() -> list:
 # ---- 完整分析 ----
 # 每次轮到一条最多完整分析这么多次；仍失败移到队尾，累计次数不限。
 ANALYSIS_MAX_ATTEMPTS = int(_env('ANALYSIS_MAX_ATTEMPTS') or 3)
-ANALYSIS_PAUSE_SECONDS = float(_env('ANALYSIS_PAUSE_SECONDS') or 0.5)
 # 免费/共享模型经常 429（该模型访问量过大）或超时，这类"临时失败"当场等一会儿重试，
 # 属于一次完整分析中的请求重试；次数用完则轮转到后续内容，累计失败不判死。
 ANALYSIS_INLINE_RETRIES = int(_env('ANALYSIS_INLINE_RETRIES') or 2)

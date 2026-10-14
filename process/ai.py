@@ -10,9 +10,58 @@
 """
 import json
 import re
+import hashlib
+from pathlib import Path
 
 import httpx
 import config as model_config
+from process.logging_util import make_log
+
+_cache_log = make_log(Path(__file__).resolve().parents[1] / 'logs' / 'ai_cache.log', echo=False)
+_cache_key_unsupported = set()
+
+
+def _cache_input(prompt: str, model: str):
+    """固定规则放进相同的系统前缀，变化的数据放在最后。"""
+    prefix = ANALYSIS_PROMPT.split('{known}', 1)[0]
+    if prompt.startswith(prefix):
+        instructions = SYSTEM_PROMPT + '\n' + prefix
+        content = prompt[len(prefix):]
+    else:
+        instructions, content = SYSTEM_PROMPT, prompt
+    digest = hashlib.sha256((model + '\n' + instructions).encode('utf-8')).hexdigest()[:24]
+    return instructions, content, 'hangxiaomai-analysis-' + digest
+
+
+def _cached_request(create, kwargs, cache_key):
+    """网关明确拒绝缓存键时才降级，不重复请求超时或服务错误。"""
+    endpoint = (MODEL_API_BASE, MODEL_PROTOCOL, kwargs['model'])
+    if endpoint in _cache_key_unsupported:
+        return create(**kwargs)
+    try:
+        return create(**kwargs, prompt_cache_key=cache_key)
+    except Exception as exc:
+        message = str(exc).lower()
+        if getattr(exc, 'status_code', None) not in (400, 422) or 'prompt_cache_key' not in message:
+            raise
+        if not any(word in message for word in ('unsupported', 'unknown', 'unrecognized', 'unexpected', 'not permitted', 'extra inputs')):
+            raise
+        _cache_key_unsupported.add(endpoint)
+        _cache_log('接口不支持 prompt_cache_key，后续仅使用固定提示词前缀')
+        return create(**kwargs)
+
+
+def _usage_value(value, key, default=None):
+    return value.get(key, default) if isinstance(value, dict) else getattr(value, key, default)
+
+
+def _record_cache(usage, model):
+    """仅记录接口明确返回的用量；缺少缓存信息不能当作零命中。"""
+    total = _usage_value(usage, 'prompt_tokens', _usage_value(usage, 'input_tokens'))
+    details = _usage_value(usage, 'prompt_tokens_details', _usage_value(usage, 'input_tokens_details'))
+    cached = _usage_value(details, 'cached_tokens', _usage_value(usage, 'cache_read_input_tokens'))
+    rate = f'{100 * cached / total:.1f}%' if isinstance(total, (int, float)) and total > 0 and isinstance(cached, (int, float)) else '未提供'
+    _cache_log(f'模型={model} 输入token={total if total is not None else "未提供"} 缓存token={cached if cached is not None else "未提供"} 复用比例={rate}')
 
 from config import (
     ANTHROPIC_VERSION,
@@ -99,14 +148,16 @@ def _headers() -> dict:
 
 
 def _chat_openai(prompt: str, temperature: float, model: str) -> str:
+    instructions, content, cache_key = _cache_input(prompt, model)
     kwargs = {
         "model": model,
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+        "messages": [{"role": "system", "content": instructions}, {"role": "user", "content": content}],
         "temperature": temperature,
     }
     if MODEL_MAX_TOKENS > 0:      # 0 = 不显式传，交给服务端默认
         kwargs["max_tokens"] = MODEL_MAX_TOKENS
-    resp = get_client().chat.completions.create(**kwargs)
+    resp = _cached_request(get_client().chat.completions.create, kwargs, cache_key)
+    _record_cache(getattr(resp, 'usage', None), model)
     choice = resp.choices[0]
     if getattr(choice, "finish_reason", "") == "length":
         raise OutputTruncated(
@@ -116,7 +167,9 @@ def _chat_openai(prompt: str, temperature: float, model: str) -> str:
 
 
 def _chat_responses(prompt: str, temperature: float, model: str) -> str:
-    resp = get_client().responses.create(model=model, instructions=SYSTEM_PROMPT, input=prompt, temperature=temperature)
+    instructions, content, cache_key = _cache_input(prompt, model)
+    resp = _cached_request(get_client().responses.create, dict(model=model, instructions=instructions, input=content, temperature=temperature), cache_key)
+    _record_cache(getattr(resp, 'usage', None), model)
     text = ""
     try:
         text = (resp.output_text or "").strip()
@@ -133,17 +186,19 @@ def _chat_responses(prompt: str, temperature: float, model: str) -> str:
 
 
 def _chat_anthropic(prompt: str, temperature: float, model: str) -> str:
+    instructions, content, _ = _cache_input(prompt, model)
     body = {
         "model": model,
-        "system": SYSTEM_PROMPT,
+        "system": instructions,
         "max_tokens": MODEL_MAX_TOKENS or 4096,   # Anthropic 必填
         "temperature": temperature,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": content}],
     }
     with httpx.Client(timeout=MODEL_TIMEOUT) as client:
         response = client.post(_endpoint("/messages"), headers=_headers(), json=body)
         response.raise_for_status()
         data = response.json()
+    _record_cache(data.get('usage'), model)
     if str(data.get("stop_reason") or "") == "max_tokens":
         raise OutputTruncated("模型输出被 max_tokens 截断；调大 MODEL_MAX_TOKENS")
     blocks = data.get("content") or []

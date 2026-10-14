@@ -127,7 +127,7 @@ def run_checks():
             assert request('/api/config', {'service': 'process', 'values': {'ANALYSIS_PAUSE_SECONDS': '0'}})[0] == 200
             assert 'secret' not in server.AUDIT.read_text(encoding='utf-8')
             fields = request('/api/config/process')[1]['data']['fields']
-            assert len(fields) == 5 and not any(row['key'].startswith('MODEL_') for row in fields)
+            assert len(fields) == 4 and not any(row['key'].startswith('MODEL_') or row['key'] == 'ANALYSIS_PAUSE_SECONDS' for row in fields)
             print('通过：鉴权、旧配置迁移、保存不切换、密钥无损保留/复制、版本冲突、使用切换及同进程刷新、删除与参数校验。')
         finally:
             httpd.shutdown()

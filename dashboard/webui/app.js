@@ -35,7 +35,8 @@ const hints = {
   ANALYSIS_MAX_ATTEMPTS: "每次轮到一条内容时最多完整分析几次；仍失败就移到队尾，下次轮到继续，没有累计重试上限。",
   ANALYSIS_INLINE_RETRIES: "遇到限流/超时时，同一轮内当场重试几次。",
   ANALYSIS_RATE_LIMIT_WAIT: "限流/超时后等待多少秒再重试。",
-  ANALYSIS_PAUSE_SECONDS: "每条内容处理完成后的等待秒数，0 表示不主动等待。",
+  ANALYSIS_PAUSE_SECONDS: "每个并行任务处理完成后的等待秒数，0 表示不主动等待。",
+  ANALYSIS_CONCURRENCY: "此接入点最多同时处理的内容数，1 表示逐条处理，最大32。",
 };
 
 const protocolLabels = {
@@ -205,7 +206,7 @@ function fieldControl(field) {
     return `<select data-key="${esc(field.key)}">${options}</select>`;
   }
   return `<input data-key="${esc(field.key)}"
-        type="${field.secret ? "password" : "text"}"
+        type="${field.secret ? "password" : (field.type || "text")}" ${field.type === "number" ? `min="${field.min ?? 0}" step="${field.step || 1}" ${field.max ? `max="${field.max}"` : ""}` : ""}
         value="${field.secret ? "" : esc(field.value || "")}"
         placeholder="${field.secret ? "已配置则留空" : esc(field.value || "")}">`;
 }
@@ -1223,12 +1224,12 @@ async function saveConfig() {
 const PROCESS_LABELS = {
   AI_REPEAT_CONTEXT: "去重参考条数", ANALYSIS_MAX_ATTEMPTS: "单条每轮尝试次数",
   ANALYSIS_INLINE_RETRIES: "单次请求重试次数", ANALYSIS_RATE_LIMIT_WAIT: "限流等待（秒）",
-  ANALYSIS_PAUSE_SECONDS: "处理间隔（秒）",
 };
 const AI_LABELS = {
   name: "接入点名称", MODEL_PROTOCOL: "接口协议", MODEL_API_BASE: "API 地址",
   MODEL_NAME: "模型名称", MODEL_API_KEY: "API 密钥", MODEL_TIMEOUT: "请求超时（秒）",
-  MODEL_MAX_TOKENS: "最大输出 Token",
+  MODEL_MAX_TOKENS: "最大输出 Token", ANALYSIS_PAUSE_SECONDS: "处理间隔（秒）",
+  ANALYSIS_CONCURRENCY: "并行数量",
 };
 let aiSettings = null;
 let aiSelected = "";
@@ -1243,6 +1244,8 @@ function captureAIFields() {
 function renderAIConfig() {
   const row = aiSettings.endpoints.find(item => item.id === aiSelected);
   $("#ai-count").textContent = aiSettings.endpoints.length;
+  $("#ai-use").disabled = row.id === aiSettings.active_id;
+  $("#ai-use").textContent = row.id === aiSettings.active_id ? "正在使用此接入点" : "使用此接入点";
   $("#ai-list").innerHTML = aiSettings.endpoints.map(item => `
     <div class="ai-card ${item.id === aiSelected ? "selected" : ""}">
       <button type="button" class="ai-select" data-ai-select="${esc(item.id)}" aria-pressed="${item.id === aiSelected}">
@@ -1250,14 +1253,11 @@ function renderAIConfig() {
         ${item.id === aiSettings.active_id ? '<span class="ai-active">当前使用</span>' : ""}
         <span class="ai-card-model">${esc(item.MODEL_NAME || "待配置")}</span>
       </button>
-      <button type="button" class="secondary ai-use" data-ai-use="${esc(item.id)}" ${item.id === aiSettings.active_id ? "disabled" : ""}>
-        ${item.id === aiSettings.active_id ? "正在使用" : "使用此接入点"}
-      </button>
     </div>`).join("");
   $("#ai-fields").innerHTML = Object.entries(AI_LABELS).map(([key, label]) => `
-    <div class="config-field ${["MODEL_API_BASE", "MODEL_NAME", "MODEL_API_KEY"].includes(key) ? "ai-wide" : ""}">
+    <div class="config-field ${["MODEL_API_KEY"].includes(key) ? "ai-wide" : ""}">
       ${fieldLabel(label, hints[key] || "")}
-      ${fieldControl({key, value: row[key] || "", secret: key === "MODEL_API_KEY", choices: key === "MODEL_PROTOCOL" ? ["openai", "responses", "anthropic"] : []})}
+      ${fieldControl({key, value: row[key] || "", secret: key === "MODEL_API_KEY", choices: key === "MODEL_PROTOCOL" ? ["openai", "responses", "anthropic"] : [], type: ["ANALYSIS_PAUSE_SECONDS", "ANALYSIS_CONCURRENCY"].includes(key) ? "number" : "text", min: key === "ANALYSIS_CONCURRENCY" ? 1 : 0, max: key === "ANALYSIS_CONCURRENCY" ? 32 : undefined, step: key === "ANALYSIS_PAUSE_SECONDS" ? "any" : 1})}
       ${key === "MODEL_API_KEY" ? `<small>${row.key_configured ? "已配置，留空则保留原密钥" : "请填写此接入点的 API 密钥"}</small>` : ""}
     </div>`).join("");
   // 未保存的密钥只保存在当前编辑会话，切换卡片后也不能丢失。
@@ -1282,7 +1282,7 @@ function addAIEndpoint(copy = false) {
   const source = aiSettings.endpoints.find(item => item.id === aiSelected);
   const row = copy ? {...source, name: `${source.name} 副本`, copy_from: source.copy_from || source.id} : {
     name: "新接入点", MODEL_PROTOCOL: "openai", MODEL_API_BASE: "", MODEL_NAME: "",
-    MODEL_API_KEY: "", MODEL_TIMEOUT: "90", MODEL_MAX_TOKENS: "0", key_configured: false,
+    MODEL_API_KEY: "", MODEL_TIMEOUT: "90", MODEL_MAX_TOKENS: "0", ANALYSIS_PAUSE_SECONDS: "0.5", ANALYSIS_CONCURRENCY: "1", key_configured: false,
   };
   row.id = crypto.randomUUID();
   aiSettings.endpoints.push(row);
@@ -1312,6 +1312,7 @@ async function saveAIConfig(useId = "") {
     controls.forEach((control, index) => { control.disabled = disabled[index]; });
     // 使用成功后编辑卡片可能已成为当前项，不能恢复成切换前的删除按钮状态。
     $("#ai-delete").disabled = aiSelected === aiSettings.active_id || aiSettings.endpoints.length === 1;
+    $("#ai-use").disabled = aiSelected === aiSettings.active_id;
   }
 }
 
@@ -1758,8 +1759,8 @@ document.addEventListener("click", (event) => {
   if (configButton) openConfig(configButton.dataset.config);
   const aiSelect = event.target.closest("[data-ai-select]");
   if (aiSelect && !aiBusy) { captureAIFields(); aiSelected = aiSelect.dataset.aiSelect; renderAIConfig(); }
-  const aiUse = event.target.closest("[data-ai-use]");
-  if (aiUse && !aiUse.disabled) saveAIConfig(aiUse.dataset.aiUse);
+  const aiUse = event.target.closest("#ai-use");
+  if (aiUse && !aiUse.disabled) saveAIConfig(aiSelected);
   if (event.target.id === "ai-add") addAIEndpoint();
   if (event.target.id === "ai-copy") addAIEndpoint(true);
   if (event.target.id === "ai-delete" && !aiBusy && !event.target.disabled) {

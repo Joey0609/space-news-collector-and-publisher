@@ -9,9 +9,10 @@ from urllib.parse import urlsplit
 from dotenv import dotenv_values
 
 MODEL_FIELDS = ("MODEL_PROTOCOL", "MODEL_API_BASE", "MODEL_NAME", "MODEL_API_KEY",
-                "MODEL_TIMEOUT", "MODEL_MAX_TOKENS")
+                "MODEL_TIMEOUT", "MODEL_MAX_TOKENS", "ANALYSIS_PAUSE_SECONDS", "ANALYSIS_CONCURRENCY")
 DEFAULTS = {"MODEL_PROTOCOL": "openai", "MODEL_API_BASE": "", "MODEL_NAME": "",
-            "MODEL_API_KEY": "", "MODEL_TIMEOUT": "90", "MODEL_MAX_TOKENS": "0"}
+            "MODEL_API_KEY": "", "MODEL_TIMEOUT": "90", "MODEL_MAX_TOKENS": "0",
+            "ANALYSIS_PAUSE_SECONDS": "0.5", "ANALYSIS_CONCURRENCY": "1"}
 
 
 def read_env(path):
@@ -35,6 +36,9 @@ def read_settings(path):
         active = "legacy"
     if not any(isinstance(item, dict) and item.get("id") == active for item in endpoints):
         raise ValueError("当前使用的 AI 接入点不存在")
+    for item in endpoints:
+        item.setdefault('ANALYSIS_PAUSE_SECONDS', values.get('ANALYSIS_PAUSE_SECONDS') or DEFAULTS['ANALYSIS_PAUSE_SECONDS'])
+        item.setdefault('ANALYSIS_CONCURRENCY', DEFAULTS['ANALYSIS_CONCURRENCY'])
     return endpoints, active
 
 
@@ -80,10 +84,12 @@ def validate_endpoints(raw, old, active, activating=False):
         try:
             timeout = float(row["MODEL_TIMEOUT"])
             maximum = int(row["MODEL_MAX_TOKENS"])
-            if not math.isfinite(timeout) or timeout <= 0 or maximum < 0:
+            pause = float(row['ANALYSIS_PAUSE_SECONDS'])
+            concurrency = int(row['ANALYSIS_CONCURRENCY'])
+            if not math.isfinite(timeout) or timeout <= 0 or maximum < 0 or not math.isfinite(pause) or pause < 0 or not 1 <= concurrency <= 32:
                 raise ValueError()
         except ValueError as exc:
-            raise ValueError("请求超时必须大于 0，最大输出 Token 必须为非负整数") from exc
+            raise ValueError("请求超时必须大于0，最大输出Token与处理间隔不能为负，并行数量必须为1至32的整数") from exc
         result.append(row)
     if active not in ids:
         raise ValueError("不能删除当前使用的接入点，请先切换到其他接入点")

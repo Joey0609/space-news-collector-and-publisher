@@ -4,6 +4,8 @@ import json
 import os
 import sys
 import time
+import subprocess
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,14 +13,17 @@ for path in (ROOT, ROOT / "process"):
     if str(path) not in sys.path: sys.path.insert(0, str(path))
 from ai import analyze_item, is_configured, config_summary
 from config import ANALYSIS_MAX_ATTEMPTS, ANALYSIS_INLINE_RETRIES, ANALYSIS_PAUSE_SECONDS, ANALYSIS_RATE_LIMIT_WAIT, AI_REPEAT_CONTEXT
+import config as runtime_config
 from collect.db import open_db
 from process.analysis_contract import processing_required
 from collect.db import ensure_processing_event
 from process.logging_util import make_log, one_line, setup_console_encoding
 log = make_log(ROOT / "logs" / "analysis.log")
 PROGRESS_FILE = ROOT / "data" / "state" / "process_progress.json"
+IS_WORKER = False
 
 def write_progress(running, phase, item=None, index=0, total=0):
+    if IS_WORKER: return
     current = None if not item else {"id": item["id"], "account": item.get("account", ""), "title": item.get("ai_title", ""), "raw": str(item.get("raw") or "")[:240]}
     payload = {"running": running, "phase": phase, "current": current, "index": index, "total": total, "updated_at": datetime.now().isoformat(timespec="seconds")}
     try:
@@ -75,7 +80,7 @@ def defer_event(conn, item_id, generation):
     if latest: tail = max(tail,datetime.fromisoformat(latest)+timedelta(microseconds=1))
     conn.execute("UPDATE processing_events SET available_at=?,created_at=? WHERE item_id=? AND generation=?",(time.time()+max(1,ANALYSIS_RATE_LIMIT_WAIT),tail.isoformat(timespec='microseconds'),item_id,generation))
 
-def analysis_pass(conn, item_ids=None):
+def cleanup_events(conn, item_ids=None):
     # 清掉已经完成或已删除条目的残留事件，避免空批次反复启动。
     events = conn.execute('SELECT item_id,generation FROM processing_events').fetchall()
     for event in events:
@@ -87,6 +92,10 @@ def analysis_pass(conn, item_ids=None):
             item=dict(current)
             conn.execute("DELETE FROM processing_events WHERE item_id=? AND generation=? AND EXISTS(SELECT 1 FROM items WHERE " + _input_sql() + " AND stage='processed')",(event['item_id'],event['generation'],*_input_args(item)))
     conn.commit()
+
+
+def analysis_pass(conn, item_ids=None):
+    cleanup_events(conn, item_ids)
     todo = pending_rows(conn,item_ids)
     ok = failed = skipped = 0
     for index,snapshot in enumerate(todo,1):
@@ -138,17 +147,73 @@ def analysis_pass(conn, item_ids=None):
             defer_event(conn,item['id'],generation)
             conn.commit()
             log(f"[队尾重试] item={item['id']} 累计{attempts}次：{one_line(str(error))}")
-        if ANALYSIS_PAUSE_SECONDS > 0: time.sleep(ANALYSIS_PAUSE_SECONDS)
+        if not IS_WORKER and ANALYSIS_PAUSE_SECONDS > 0: time.sleep(ANALYSIS_PAUSE_SECONDS)
     return {'ok':ok,'failed':failed,'skipped':skipped}
 
+
+def parallel_pass(conn, item_ids=None):
+    """每个任务独立进程与连接；完成即提交，并按接入点节奏补充任务。"""
+    cleanup_events(conn, item_ids)
+    todo = deque(pending_rows(conn, item_ids))
+    total = len(todo)
+    running = {}
+    available = [0.0] * runtime_config.ANALYSIS_CONCURRENCY
+    capacity = runtime_config.ANALYSIS_CONCURRENCY
+    result = {'ok': 0, 'failed': 0, 'skipped': 0}
+    completed = 0
+    try:
+        while todo or running:
+            runtime_config.refresh_model_config()
+            limit = runtime_config.ANALYSIS_CONCURRENCY
+            pause = runtime_config.ANALYSIS_PAUSE_SECONDS
+            if limit > capacity:
+                available.extend([0.0] * (limit - capacity))
+            capacity = limit
+            now = time.monotonic()
+            for process, item in list(running.items()):
+                if process.poll() is None: continue
+                del running[process]
+                available.append(now + pause)
+                completed += 1
+                row = conn.execute('SELECT * FROM items WHERE id=?', (item['id'],)).fetchone()
+                key = 'skipped' if row is None else ('failed' if processing_required(dict(row)) else 'ok')
+                result[key] += 1
+                if process.returncode:
+                    event = conn.execute('SELECT generation FROM processing_events WHERE item_id=?', (item['id'],)).fetchone()
+                    if event: defer_event(conn, item['id'], event['generation']); conn.commit()
+                write_progress(True, f'已完成 {completed}/{total}，并行处理中 {len(running)}', next(iter(running.values()), None), completed, total)
+            # 降低并行数时收回闲置槽位，保留任务完成后的冷却时间。
+            available = sorted(available, reverse=True)[:max(0, limit - len(running))]
+            available.sort()
+            while todo and len(running) < limit and available and available[0] <= now:
+                item = todo[0]
+                process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--worker', '--item-ids', str(item['id'])], cwd=ROOT)
+                todo.popleft()
+                available.pop(0)
+                running[process] = item
+                write_progress(True, f'并行处理中 {len(running)}，已完成 {completed}/{total}', item, completed, total)
+            if todo or running: time.sleep(0.1)
+    finally:
+        for process in running:
+            if process.poll() is None:
+                process.terminate()
+                try: process.wait(timeout=5)
+                except subprocess.TimeoutExpired: process.kill(); process.wait()
+    return result
+
+
 def main():
+    global IS_WORKER
     parser = argparse.ArgumentParser()
     parser.add_argument('--item-ids')
+    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     ids = None if args.item_ids is None else list(dict.fromkeys(int(v) for v in args.item_ids.split(',') if v.strip().isdigit()))
     if ids == []: parser.error('--item-ids 不能为空')
+    IS_WORKER = args.worker
+    if IS_WORKER and (ids is None or len(ids) != 1): parser.error('内部任务必须指定单条内容')
     from dashboard.service_runner import acquire_instance_lock
-    worker_lock = acquire_instance_lock('analysis_worker')
+    worker_lock = acquire_instance_lock(f'analysis_item_{ids[0]}' if IS_WORKER else 'analysis_worker')
     if worker_lock is None:
         log('[等待] 已有完整分析程序运行，本次不重复启动')
         return 0
@@ -164,9 +229,10 @@ def main():
             log('[等待] AI 配置不完整，待分析内容保留在队列')
             return 0
         summary = config_summary()
-        log(f"[完整分析] 模型={summary['model']} 待分析={len(pending_rows(conn,ids))}")
-        result = analysis_pass(conn,ids)
-        log(f"[本轮结果] 完成{result['ok']}，失败待重试{result['failed']}，跳过{result['skipped']}")
+        if not IS_WORKER:
+            log(f"[完整分析] 模型={summary['model']} 待分析={len(pending_rows(conn,ids))} 并行={runtime_config.ANALYSIS_CONCURRENCY} 间隔={runtime_config.ANALYSIS_PAUSE_SECONDS}秒")
+        result = analysis_pass(conn,ids) if IS_WORKER else parallel_pass(conn,ids)
+        if not IS_WORKER: log(f"[本轮结果] 完成{result['ok']}，失败待重试{result['failed']}，跳过{result['skipped']}")
         return 0
     finally:
         conn.close()

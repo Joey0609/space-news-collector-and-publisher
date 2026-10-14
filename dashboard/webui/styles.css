@@ -389,7 +389,7 @@ dialog::backdrop {
 .ai-editor { padding: 24px 28px; min-width: 0; }
 .ai-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ai-editor-head button { padding: 6px 10px; font-size: 12px; }
-#ai-fields { padding: 22px 0 0; max-height: none; overflow: visible; }
+#ai-fields { padding: 22px 0 0; max-height: none; overflow: visible; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .ai-wide { grid-column: 1 / -1; }
 #ai-fields small { display: block; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .ai-current { align-self: center; margin-right: auto; color: var(--muted); font-size: 13px; }
