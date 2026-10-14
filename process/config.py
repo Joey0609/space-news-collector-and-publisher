@@ -10,15 +10,16 @@
 
 **没有内置服务商默认值**：MODEL_API_BASE / MODEL_NAME / MODEL_API_KEY 三项必须自己配，
 缺任一项就不发请求（`is_configured()` 为假），错误信息里会列出缺哪几项。
+AI 接入点从 config/ai_endpoints.json 读取；旧 .env 只用于首次迁移。
 """
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from process.model_endpoints import read_settings
+    from process.model_endpoints import read_settings, version as settings_version
 except ModuleNotFoundError:
-    from model_endpoints import read_settings
+    from model_endpoints import read_settings, version as settings_version
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / '.env', encoding='utf-8')
@@ -56,12 +57,12 @@ _model_stamp = None
 
 
 def refresh_model_config() -> bool:
-    """每次 AI 请求前检查 .env；已发出的请求不受切换影响。"""
+    """每次 AI 请求前检查独立 JSON；已发出的请求不受切换影响。"""
     global _model_stamp, MODEL_API_BASE, MODEL_NAME, MODEL_API_KEY
     global MODEL_PROTOCOL, MODEL_TIMEOUT, MODEL_MAX_TOKENS
     global ANALYSIS_PAUSE_SECONDS, ANALYSIS_CONCURRENCY
     path = ROOT / '.env'
-    stamp = (path.stat().st_mtime_ns, path.stat().st_size) if path.exists() else (0, 0)
+    stamp = settings_version(path)
     if stamp == _model_stamp:
         return False
     endpoints, active = read_settings(path)

@@ -10,6 +10,7 @@
     venv\\Scripts\\python.exe 临时定时推送.py --interval 600   自定义间隔秒数
 """
 import datetime
+from ali_core.delivery import deliver_all_images
 import sys
 import time
 
@@ -57,13 +58,10 @@ def send_one(group_openid: str = "") -> bool:
     token = get_token(host, appid, secret)
     hdrs = auth_headers(token, appid)
 
-    file_info = ""
-    if images:
-        try:
-            file_info = upload_group_image(host, hdrs, goid, images[0])
-        except Exception as e:
-            log(f"[图] 上传失败: {e}")
-    ok = send_group_rich(host, hdrs, goid, text, file_info)
+    ok = deliver_all_images(item, queue.source_for(goid), text, images,
+                            lambda path: upload_group_image(host, hdrs, goid, path),
+                            lambda body, info: send_group_rich(host, hdrs, goid, body, info))
+
     if not ok:
         log("发送失败，未标记（下轮重试）")
         return False

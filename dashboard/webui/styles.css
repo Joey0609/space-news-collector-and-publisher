@@ -1194,6 +1194,10 @@ dialog::backdrop {
 
 .process-backlog-item:last-child { border-bottom: 0 }
 .process-backlog-item.is-stuck { background: #fffaf0 }
+.process-backlog-item.is-processing { background: #edf5ff; box-shadow: inset 3px 0 #2563eb; }
+.process-backlog-item.is-processing .process-backlog-item__head > span { color: #2563eb; font-weight: 700; }
+.queue-position { display: inline-block; padding: 2px 7px; margin-right: 6px; border-radius: 6px; background: #e8eef8; color: #496181; font-size: 11px; }
+.processing-elapsed { display: inline-block; margin-left: 6px; white-space: nowrap; }
 
 .process-backlog-item__head {
     display: flex;

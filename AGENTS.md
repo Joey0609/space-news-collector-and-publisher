@@ -100,7 +100,7 @@ distribute/ws_channel.py 渠道 SDK（连接/重连/hello/收条/result/defer/wa
 ## 硬规则
 
 1. 不触发真实抓取、真实 QQ 发送，除非用户明确要求。
-2. 密钥、cookies、QQ 号只从 `.env` 读取，不提交。
+2. cookies、QQ 凭据从 `.env` 读取；AI 接入点及 API 密钥按用户要求保存到不入库的 `config/ai_endpoints.json`。凭据不提交。
 3. 所有脚本必须写日志到 `logs/`。
 4. JSON/TOML 写入要 UTF-8；中文 TOML key 必须加引号；重要 JSON 使用原子写。
 5. 渠道**只**通过看板 WebSocket 拿内容并回报结果（服务端才写 `items.pushed`），
@@ -213,3 +213,5 @@ P4/P5：完成第一版。看板后端和前端可本机启动，后续可继续
 ## AI必须保证启动的dashboard有终端弹窗，而不是后台静默启动。如果需要暂停服务尽量只暂停对应的服务，而不是直接关闭整个dashboard。
 
 AI 接入点独立设置处理间隔 `ANALYSIS_PAUSE_SECONDS` 和并行数量 `ANALYSIS_CONCURRENCY`（1至32，默认1）。`analyze_db.py` 调度独立的单条子进程，使用各自的 SQLite 连接，结果逐条提交；停止处理时必须停止整棵进程树。
+
+图片规则：`collect/image_filter.py` 使用 OpenCV 定位二维码，二维码区域并集超过整图面积50%时排除该图（不删除原文件）。采集写库及分发读取均过滤，识别结果按文件修改时间缓存。艾莉森按正文/日期/全部配图顺序发送，多图分消息追加，正文和全部图片成功才回报成功；部分发送进度保存在 `data/state/alison_delivery_progress.json`，重试继续未完成部分。

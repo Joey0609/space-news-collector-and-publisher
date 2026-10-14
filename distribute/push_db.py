@@ -139,7 +139,8 @@ def _row_to_item(row) -> dict:
     """数据库行 → 分发端用的条目字典（和旧队列 JSON 的字段尽量一致）。"""
     item = dict(row)
     item["pushed"] = _parse_pushed(item.get("pushed"))
-    item["images"] = _parse_images(item.get("images"))
+    from collect.image_filter import filter_image_paths
+    item["images"] = filter_image_paths(_parse_images(item.get("images")))
     score = item.get("ai_score")
     item["score"] = score if score is not None else 0
     return item

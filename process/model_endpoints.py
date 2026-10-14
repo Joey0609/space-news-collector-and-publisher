@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""多个模型接入点的共享契约；凭据始终只保存在根 .env。"""
+"""AI 接入点独立保存到本地 JSON；仅首次迁移时读取旧 .env。"""
 import hashlib
 import json
 import math
 import re
+import os
+import tempfile
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
@@ -19,10 +22,21 @@ def read_env(path):
     return {key: value or "" for key, value in dotenv_values(path, encoding="utf-8-sig", interpolate=False).items()}
 
 
+def settings_path(env_path):
+    return Path(env_path).parent / 'config' / 'ai_endpoints.json'
+
+
 def read_settings(path):
-    values = read_env(path)
-    raw = values.get("MODEL_ENDPOINTS", "")
-    if raw:
+    destination = settings_path(path)
+    values = {} if destination.exists() else read_env(path)
+    raw = values.get('MODEL_ENDPOINTS', '')
+    if destination.exists():
+        try:
+            payload = json.loads(destination.read_text(encoding='utf-8-sig'))
+            endpoints, active = payload['endpoints'], payload['active_id']
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValueError('AI 配置 JSON 格式错误，请检查 config/ai_endpoints.json') from exc
+    elif raw:
         try:
             endpoints = json.loads(raw)
         except (ValueError, TypeError) as exc:
@@ -34,16 +48,23 @@ def read_settings(path):
         endpoints = [{"id": "legacy", "name": "默认接入点",
                       **{key: values.get(key) or DEFAULTS[key] for key in MODEL_FIELDS}}]
         active = "legacy"
-    if not any(isinstance(item, dict) and item.get("id") == active for item in endpoints):
+    if not isinstance(endpoints, list) or not endpoints or not all(isinstance(item, dict) for item in endpoints):
+        raise ValueError('AI 配置必须包含非空的接入点列表')
+    if not any(item.get("id") == active for item in endpoints):
         raise ValueError("当前使用的 AI 接入点不存在")
     for item in endpoints:
-        item.setdefault('ANALYSIS_PAUSE_SECONDS', values.get('ANALYSIS_PAUSE_SECONDS') or DEFAULTS['ANALYSIS_PAUSE_SECONDS'])
-        item.setdefault('ANALYSIS_CONCURRENCY', DEFAULTS['ANALYSIS_CONCURRENCY'])
+        for key in MODEL_FIELDS:
+            item.setdefault(key, values.get(key) or DEFAULTS[key])
     return endpoints, active
 
 
 def version(path):
-    return hashlib.sha256(path.read_bytes() if path.exists() else b"").hexdigest()
+    destination = settings_path(path)
+    if destination.exists():
+        return hashlib.sha256(destination.read_bytes()).hexdigest()
+    # 首次保存仅比较旧 AI 配置；其他服务修改 .env 不应导致冲突。
+    endpoints, active = read_settings(path)
+    return hashlib.sha256(json.dumps({'endpoints': endpoints, 'active_id': active}, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
 
 
 def public_settings(path):
@@ -100,7 +121,19 @@ def validate_endpoints(raw, old, active, activating=False):
     return result
 
 
-def encoded_settings(endpoints, active):
-    # 单引号包裹 JSON，防止 dotenv 把密钥中的 #、$ 或空格解释成语法。
-    raw = json.dumps(endpoints, ensure_ascii=True, separators=(",", ":")).replace("'", "\\u0027")
-    return {"MODEL_ENDPOINTS": "'" + raw.replace("\\", "\\\\") + "'", "MODEL_ACTIVE_ENDPOINT": active}
+def save_settings(path, endpoints, active):
+    """UTF-8 原子替换，只写 AI 文件，密钥不经过 dotenv 转义。"""
+    destination = settings_path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = {'active_id': active, 'endpoints': endpoints}
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=destination.parent, prefix='.ai-endpoints-', suffix='.tmp', delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None: temporary.unlink(missing_ok=True)

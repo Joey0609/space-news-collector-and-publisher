@@ -22,10 +22,16 @@ log = make_log(ROOT / "logs" / "analysis.log")
 PROGRESS_FILE = ROOT / "data" / "state" / "process_progress.json"
 IS_WORKER = False
 
-def write_progress(running, phase, item=None, index=0, total=0):
+def write_progress(running, phase, item=None, index=0, total=0, active_items=None):
     if IS_WORKER: return
-    current = None if not item else {"id": item["id"], "account": item.get("account", ""), "title": item.get("ai_title", ""), "raw": str(item.get("raw") or "")[:240]}
-    payload = {"running": running, "phase": phase, "current": current, "index": index, "total": total, "updated_at": datetime.now().isoformat(timespec="seconds")}
+    def describe(row):
+        return {"id": row["id"], "account": row.get("account", ""), "title": row.get("ai_title", ""),
+                "raw": str(row.get("raw") or "")[:240], "started_at": row.get("_processing_started_at"),
+                "generation": row.get("_processing_generation")}
+    active = [describe(row) for row in (active_items if active_items is not None else ([item] if item else []))]
+    current = active[0] if active else None
+    payload = {"running": running, "phase": phase, "current": current, "active_items": active,
+               "index": index, "total": total, "updated_at": datetime.now().isoformat(timespec="seconds")}
     try:
         PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
         temporary = PROGRESS_FILE.with_suffix(".tmp")
@@ -108,6 +114,8 @@ def analysis_pass(conn, item_ids=None):
         ensure_processing_event(conn,item['id'])
         generation = conn.execute("SELECT generation FROM processing_events WHERE item_id=?",(item['id'],)).fetchone()[0]
         conn.commit()
+        item['_processing_started_at'] = time.time()
+        item['_processing_generation'] = generation
         write_progress(True,'正在完整分析',item,index,len(todo))
         attempts = int(item['analysis_attempts'] or 0)
         analysis = None
@@ -181,17 +189,22 @@ def parallel_pass(conn, item_ids=None):
                 if process.returncode:
                     event = conn.execute('SELECT generation FROM processing_events WHERE item_id=?', (item['id'],)).fetchone()
                     if event: defer_event(conn, item['id'], event['generation']); conn.commit()
-                write_progress(True, f'已完成 {completed}/{total}，并行处理中 {len(running)}', next(iter(running.values()), None), completed, total)
+                write_progress(True, f'已完成 {completed}/{total}，并行处理中 {len(running)}',
+                               index=completed, total=total, active_items=list(running.values()))
             # 降低并行数时收回闲置槽位，保留任务完成后的冷却时间。
             available = sorted(available, reverse=True)[:max(0, limit - len(running))]
             available.sort()
             while todo and len(running) < limit and available and available[0] <= now:
-                item = todo[0]
+                item = dict(todo[0])
+                item['_processing_started_at'] = time.time()
+                event = conn.execute('SELECT generation FROM processing_events WHERE item_id=?', (item['id'],)).fetchone()
+                item['_processing_generation'] = event['generation'] if event else None
                 process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--worker', '--item-ids', str(item['id'])], cwd=ROOT)
                 todo.popleft()
                 available.pop(0)
                 running[process] = item
-                write_progress(True, f'并行处理中 {len(running)}，已完成 {completed}/{total}', item, completed, total)
+                write_progress(True, f'并行处理中 {len(running)}，已完成 {completed}/{total}',
+                               index=completed, total=total, active_items=list(running.values()))
             if todo or running: time.sleep(0.1)
     finally:
         for process in running:

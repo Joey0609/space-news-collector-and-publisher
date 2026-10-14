@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""隔离 .env 的多接入点 HTTP 与热切换自检，不调用真实模型。"""
+"""隔离 JSON 的多接入点 HTTP 与热切换自检，不调用真实模型。"""
 import json
 import sys
 import tempfile

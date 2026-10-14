@@ -62,13 +62,17 @@ def send_sync(item: dict) -> dict:
     body = str(item.get("zh") or item.get("raw") or "").strip()
     if not body:
         return {"ok": False, "detail": "条目没有可发正文"}
-    title = str(item.get("ai_title") or "").strip()
-    text = "\n\n".join(part for part in (title, body) if part)
+    from distribute.alison.ali_core.render import build_text, item_images
+    from collect.image_filter import filter_image_paths
+    text = build_text(item)
+    images = filter_image_paths(item_images(item))
+    message = [{"type": "text", "data": {"text": text}}]
+    message.extend({"type": "image", "data": {"file": path if path.startswith(('http://', 'https://')) else Path(path).resolve().as_uri()}} for path in images)
 
     async def run() -> dict:
         try:
             async with connect(cfg["url"], cfg["token"]) as ws:
-                resp = await send_private_msg(ws, cfg["target"], text, log)
+                resp = await send_private_msg(ws, cfg["target"], message, log)
                 if resp and str(resp.get("status", "")).lower() in ("ok", "async"):
                     return {"ok": True}
                 return {"ok": False, "detail": f"NapCat 返回 {resp.get('status') if resp else '无响应'}"}

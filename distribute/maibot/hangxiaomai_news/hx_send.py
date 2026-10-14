@@ -111,12 +111,15 @@ class SendMixin:
     # ────────────────────────── 底层发送 ──────────────────────────
 
     async def _send_text_and_images(self, stream_id: str, text: str, image_paths: list) -> bool:
-        """发一条文字 + 图片（超 MAX_IMG_PER_MSG 则另凑纯图消息）。返回首条是否成功。"""
+        """发文字及全部配图，超过 MAX_IMG_PER_MSG 时分批，全部成功才返回成功。"""
         first_b64 = []
         for p in image_paths[:MAX_IMG_PER_MSG]:
             b = img_to_base64(p)
             if b:
                 first_b64.append(b)
+            else:
+                self.ctx.logger.warning(f"配图无法读取: {p}")
+                return False
         ok = False
         try:
             if first_b64:
@@ -128,17 +131,22 @@ class SendMixin:
             ok = bool(r) if not isinstance(r, dict) else bool(r.get("sent"))
         except Exception as e:
             self.ctx.logger.warning(f"发送(文字+图)失败(可能图/消息被拒): {e}")
+        if not ok:
+            return False
         # 超出上限的图：每 MAX 张一条纯图消息
         extra = image_paths[MAX_IMG_PER_MSG:]
         for i in range(0, len(extra), MAX_IMG_PER_MSG):
             chunk = extra[i:i + MAX_IMG_PER_MSG]
             segs = [{"type": "image", "content": b} for b in (img_to_base64(p) for p in chunk) if b]
-            if not segs:
-                continue
+            if len(segs) != len(chunk):
+                return False
             try:
-                await self.ctx.send.hybrid(segs, stream_id, return_details=True)
+                result = await self.ctx.send.hybrid(segs, stream_id, return_details=True)
+                if not (bool(result.get('sent')) if isinstance(result, dict) else bool(result)):
+                    return False
             except Exception as e:
                 self.ctx.logger.warning(f"发送多出图片失败: {e}")
+                return False
         return ok
 
     async def _send_text(self, stream_id: str, text: str) -> bool:
@@ -162,7 +170,7 @@ class SendMixin:
             return False
         title = str(item.get("ai_title") or "").strip()
         source = build_source_line(item)
-        text1 = "\n\n".join(part for part in (title, source, translation) if part)
+        text1 = "\n\n".join(part for part in (title, translation, source) if part)
         persona = maisaka_persona()
         prompt = (
             f"{persona}\n\n"
@@ -173,6 +181,8 @@ class SendMixin:
         reply = llm_text(prompt, temperature=0.7, logger=self.ctx.logger) or "这条有点意思，你可以看看。"
         images = item_images(item) if with_img else []
         ok_main = await self._send_text_and_images(stream_id, text1, images)
+        if not ok_main:
+            return False
         await asyncio.sleep(2)  # 原文/图之后稍作停顿再补评论
-        ok_reply = await self._send_text(stream_id, reply)
-        return ok_main or ok_reply
+        await self._send_text(stream_id, reply)
+        return ok_main

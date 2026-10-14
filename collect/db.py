@@ -46,6 +46,7 @@ def enqueue_processing_event(c, item_id: int) -> None:
 
 
 def upsert_raw(item):
+ from collect.image_filter import filter_image_paths
  key=f"{item.get('platform','x')}:{item.get('origin_id') or item.get('account','')}"
  c=open_db()
  now=datetime.now().isoformat(timespec='seconds')
@@ -57,7 +58,7 @@ def upsert_raw(item):
   'quoted_url':item.get('quoted_url',''),'ts':item.get('ts',0),'date':item.get('date',''),
   'content_type':item.get('content_type',''),'raw':str(item.get('raw') or ''),
   'ori_url':item.get('ori_url') or item.get('url',''),
-  'images':json.dumps(item.get('images',[]),ensure_ascii=False),
+  'images':json.dumps(filter_image_paths(item.get('images',[])),ensure_ascii=False),
  }
  old=c.execute("SELECT id,raw,account,quoted_account,quoted_raw FROM items WHERE dedup_key=?",(key,)).fetchone()
  is_new=old is None

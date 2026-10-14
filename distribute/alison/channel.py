@@ -23,6 +23,7 @@ from distribute.alison.ali_core.log import log, setup_console_encoding  # noqa: 
 from distribute.alison.ali_core.qq_api import (auth_headers, get_token,
                                               upload_group_image)  # noqa: E402
 from distribute.alison.ali_core.render import build_text, item_images  # noqa: E402
+from distribute.alison.ali_core.delivery import deliver_all_images  # noqa: E402
 from distribute.alison.gateway import BotRuntime  # noqa: E402
 from distribute.ws_channel import ChannelClient  # noqa: E402
 
@@ -60,19 +61,17 @@ class AlisonSender:
             return {"ok": False, "detail": "条目没有可发正文"}
         images = item_images(item) if not self.no_image and settings.get("ALISON_WITH_IMAGE", "1") == "1" else []
         try:
-            file_info = ""
+            headers = None
+            host = api_host(settings)
             if images:
-                try:
-                    host = api_host(settings)
-                    token = get_token(host, appid, secret)
-                    file_info = upload_group_image(host, auth_headers(token, appid),
-                                                   group_openid, images[0])
-                except Exception:
-                    log(f"[图] 上传失败，改发纯文字 id={item.get('id')} group_openid={group_openid}")
-            if self.runtime.send(group_openid, text, file_info):
+                token = get_token(host, appid, secret)
+                headers = auth_headers(token, appid)
+            if deliver_all_images(item, source, text, images,
+                                  lambda path: upload_group_image(host, headers, group_openid, path),
+                                  lambda body, info: self.runtime.send(group_openid, body, info)):
                 log(f"[已发] @{item.get('account')} id={item.get('id')} group_openid={group_openid}")
                 return {"ok": True}
-            return {"ok": False, "detail": self.runtime.last_error or "QQ Bot 发送返回失败"}
+            return {"ok": False, "detail": self.runtime.last_error or "正文或配图未全部发送成功，将从已发送位置继续重试"}
         except Exception as exc:
             # Never log exception bodies from credential/token exchanges.
             log(f"[发送失败] item={item.get('id')} group_openid={group_openid} 类型={type(exc).__name__}")

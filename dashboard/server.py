@@ -236,7 +236,7 @@ def save_ai_config(payload: dict, use=False) -> dict:
         if use:
             active = str(payload.get("id", ""))
         endpoints = model_endpoints.validate_endpoints(payload.get("endpoints"), old, active, activating=use)
-        _write_env_unlocked(model_endpoints.encoded_settings(endpoints, active))
+        model_endpoints.save_settings(path, endpoints, active)
         result = model_endpoints.public_settings(path)
     audit("ai_use" if use else "ai_config", {"active_id": active, "endpoint_ids": [item["id"] for item in endpoints]})
     return result
@@ -385,6 +385,33 @@ def _read_process_progress() -> dict:
         return {}
 
 
+def active_process_progress() -> dict:
+    """同一份运行状态供摘要与队列使用，停止后不保留过期的处理标记。"""
+    progress = _read_process_progress()
+    running = bool(services().get("process", {}).get("running"))
+    active = bool(running and progress.get("running"))
+    entries = progress.get("active_items")
+    if not isinstance(entries, list):
+        entries = [progress["current"]] if isinstance(progress.get("current"), dict) else []
+    normalized = []
+    for item in entries if active else []:
+        if not isinstance(item, dict) or item.get("id") is None:
+            continue
+        row = dict(item)
+        try:
+            start = float(item.get("started_at") or 0)
+        except (TypeError, ValueError):
+            start = 0
+        if not math.isfinite(start) or start < 0:
+            start = 0
+        row["started_at"] = start or None
+        row["elapsed_seconds"] = max(0, time.time() - start) if start else None
+        normalized.append(row)
+    return {"running": active, "phase": progress.get("phase") if active else ("等待下一轮" if running else "已停止"),
+            "active_items": normalized, "current": normalized[0] if normalized else None,
+            "index": progress.get("index", 0) if active else 0, "total": progress.get("total", 0) if active else 0}
+
+
 def process_backlog(include_items: bool = True) -> dict:
     """全库扫描处理池；缺失项与处理器使用同一完整性契约。"""
     db = DATA / "hx.sqlite3"
@@ -394,7 +421,13 @@ def process_backlog(include_items: bool = True) -> dict:
     try:
         conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM items WHERE raw IS NOT NULL AND TRIM(raw)<>'' ORDER BY COALESCE(ts,0) DESC,id DESC").fetchall()
+        has_events = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='processing_events'").fetchone()
+        if has_events:
+            rows = conn.execute("SELECT i.*,e.created_at AS queue_created_at,e.available_at AS queue_available_at,"
+                                "e.generation AS queue_generation FROM items i LEFT JOIN processing_events e ON e.item_id=i.id "
+                                "WHERE i.raw IS NOT NULL AND TRIM(i.raw)<>'' ORDER BY e.created_at,i.id").fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM items WHERE raw IS NOT NULL AND TRIM(raw)<>'' ORDER BY id").fetchall()
         conn.close()
     except Exception as exc:
         print(f"[看板] 处理队列读取失败: {exc}", flush=True)
@@ -407,7 +440,18 @@ def process_backlog(include_items: bool = True) -> dict:
 
     items = []
     ready_count = stuck_count = 0
-    for item in candidates:
+    progress = active_process_progress()
+    active_by_id = {str(item["id"]): item for item in progress["active_items"]}
+    now = time.time()
+    def queue_order(item):
+        current = active_by_id.get(str(item["id"]))
+        if current and current.get("generation") is not None and item.get("queue_generation") != current["generation"]:
+            current = None
+        item["_current_progress"] = current
+        return (0 if current else (1 if item.get("queue_created_at") and (item.get("queue_available_at") or 0) <= now else 2),
+                item.get("queue_created_at") or "9999", item["id"])
+    candidates.sort(key=queue_order)
+    for position, item in enumerate(candidates, 1):
         missing = missing_analysis_fields(item)
         if not missing:
             missing.append("流程阶段")
@@ -419,9 +463,14 @@ def process_backlog(include_items: bool = True) -> dict:
             "account": item.get("account") or "未知账号",
             "title": str(item.get("ai_title") or "").strip(),
             "raw": str(item.get("raw") or "")[:240],
-            "stage": item.get("stage") or "", "phase": "待完整分析" if missing[0] != "流程阶段" else "待完整分析",
+            "stage": item.get("stage") or "", "phase": "正在完整分析" if item.get("_current_progress") else "待完整分析",
             "missing": missing, "attempts": attempts, "max_attempts": max_attempts,
             "stuck": stuck, "error": str(item.get("analysis_error") or "")[:240],
+            "queue_position": position, "queued": bool(item.get("queue_created_at")),
+            "retry_at": item.get("queue_available_at") or 0,
+            "processing": bool(item.get("_current_progress")),
+            "started_at": (item.get("_current_progress") or {}).get("started_at"),
+            "elapsed_seconds": (item.get("_current_progress") or {}).get("elapsed_seconds"),
         })
 
     return {"items": items, "remaining_count": len(items),
@@ -430,15 +479,9 @@ def process_backlog(include_items: bool = True) -> dict:
 
 def process_progress() -> dict:
     backlog = process_backlog(include_items=False)
-    progress = _read_process_progress()
-    running = bool(services().get("process", {}).get("running"))
-    active = bool(running and progress.get("running"))
+    active_progress = active_process_progress()
     return {
-        "running": active,
-        "phase": progress.get("phase") if active else ("等待下一轮" if running else "已停止"),
-        "current": progress.get("current") if active else None,
-        "index": progress.get("index", 0) if active else 0,
-        "total": progress.get("total", 0) if active else 0,
+        **active_progress,
         "remaining_count": backlog["remaining_count"],
         "ready_count": backlog["ready_count"],
         "stuck_count": backlog["stuck_count"],

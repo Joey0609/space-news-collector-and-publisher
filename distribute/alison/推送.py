@@ -22,6 +22,7 @@
 """
 import sys
 
+from ali_core.delivery import deliver_all_images
 from ali_core.env import api_host, credentials, is_sandbox, load_env, load_state
 from ali_core.groups import get_group, list_groups
 from ali_core.jsonio import load_json, save_json  # noqa: F401
@@ -138,14 +139,9 @@ def main():
     token = get_token(host, appid, secret)
     hdrs = auth_headers(token, appid)
 
-    # 图文一条：上传第一张图 → msg_type=7 带 content + media
-    file_info = ""
-    if images:
-        try:
-            file_info = upload_group_image(host, hdrs, goid, images[0])
-        except Exception as e:
-            log(f"[图] 上传失败({images[0]}): {e}")
-    ok = send_group_rich(host, hdrs, goid, text, file_info)
+    ok = deliver_all_images(item, queue.source_for(goid), text, images,
+                            lambda path: upload_group_image(host, hdrs, goid, path),
+                            lambda body, info: send_group_rich(host, hdrs, goid, body, info))
 
     if ok:
         # 发完才标记：写数据库（items.pushed 里本通道 source = true），不再动任何 JSON 队列

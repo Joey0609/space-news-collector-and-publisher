@@ -469,7 +469,8 @@ function renderProcessProgress(progress) {
   if (progress.running && current) {
     const title = current.title || String(current.raw || "").replace(/\s+/g, " ").slice(0, 64) || "正在整理内容";
     const position = progress.total ? ` · ${progress.index}/${progress.total}` : "";
-    currentLine.textContent = `${progress.phase || "正在处理"}：#${current.id} @${current.account || "未知账号"} · ${title}${position}`;
+    const duration = current.elapsed_seconds == null ? "" : ` · 已用 ${formatProcessingTime(current.elapsed_seconds)}`;
+    currentLine.textContent = `${progress.phase || "正在处理"}：#${current.id} @${current.account || "未知账号"} · ${title}${position}${duration}`;
   } else if (progress.running) {
     currentLine.textContent = progress.phase || "正在准备处理任务";
   } else {
@@ -480,6 +481,20 @@ function renderProcessProgress(progress) {
   countButton.title = "点击查看所有待处理内容；失败项持续轮转重试";
   countButton.classList.toggle("has-stuck", stuck > 0);
   countButton.setAttribute("aria-label", `剩余 ${progress.remaining_count || 0} 条，点击查看列表，失败项持续轮转重试`);
+}
+
+function formatProcessingTime(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (total < 60) return `${total} 秒`;
+  if (total < 3600) return `${Math.floor(total / 60)} 分 ${total % 60} 秒`;
+  return `${Math.floor(total / 3600)} 小时 ${Math.floor(total % 3600 / 60)} 分 ${total % 60} 秒`;
+}
+
+function updateProcessingTimers() {
+  $$("#process-backlog-list [data-processing-elapsed]").forEach(element => {
+    const elapsed = Number(element.dataset.processingElapsed) + (Date.now() - Number(element.dataset.observedAt)) / 1000;
+    element.textContent = `已用 ${formatProcessingTime(elapsed)}`;
+  });
 }
 
 function renderProcessBacklog(data) {
@@ -494,27 +509,55 @@ function renderProcessBacklog(data) {
   list.innerHTML = items.map((item) => {
     const title = item.title || String(item.raw || "").replace(/\s+/g, " ").slice(0, 100) || "（无正文）";
     const missing = item.missing?.length ? `缺少：${item.missing.join("、")}` : "译文待完成";
-    const status = item.error ? "失败待轮转重试" : "等待处理";
+    const status = item.processing ? "正在处理" : (item.error ? "失败待轮转重试" : "等待处理");
+    const elapsed = item.processing && item.elapsed_seconds != null
+      ? `<span class="processing-elapsed" data-processing-elapsed="${esc(item.elapsed_seconds)}" data-observed-at="${Date.now()}">已用 ${formatProcessingTime(item.elapsed_seconds)}</span>` : "";
+    const position = item.queue_position === 1 ? "队头" : `队列 ${item.queue_position || ""}`;
     const origin = item.origin_id ? ` · X:${item.origin_id}` : "";
-    return `<article class="process-backlog-item ${item.stuck ? "is-stuck" : ""}">
-      <div class="process-backlog-item__head"><strong>#${esc(item.id)} · ${esc(title)}</strong><span>${esc(status)}</span></div>
+    return `<article class="process-backlog-item ${item.processing ? "is-processing" : ""}" data-queue-id="${esc(item.id)}">
+      <div class="process-backlog-item__head"><strong><small class="queue-position">${esc(position)}</small> #${esc(item.id)} · ${esc(title)}</strong><span>${esc(status)} ${elapsed}</span></div>
       <div class="process-backlog-item__meta">@${esc(item.account)} · ${esc(item.phase)} · ${esc(item.stage || "")} · ${esc(missing)} · 累计尝试 ${esc(item.attempts)} 次 · 每次轮到最多 ${esc(item.max_attempts)} 次${esc(origin)}</div>
-      ${item.error ? `<p class="process-backlog-item__error">${esc(item.error)}</p>` : ""}
+      ${item.error ? `<p class="process-backlog-item__error">${item.processing ? "最近错误：" : ""}${esc(item.error)}</p>` : ""}
     </article>`;
   }).join("");
+}
+
+let backlogLoading = false;
+let backlogSession = 0;
+async function refreshProcessBacklog() {
+  const dialog = $("#process-backlog-dialog");
+  if (!dialog.open || backlogLoading) return;
+  backlogLoading = true;
+  const session = backlogSession;
+  const list = $("#process-backlog-list");
+  const scrollTop = list.scrollTop;
+  try {
+    const data = await apiGet("/api/process/backlog");
+    if (session !== backlogSession || !dialog.open) return;
+    renderProcessBacklog(data);
+    list.scrollTop = scrollTop;
+  } catch (error) {
+    if (session === backlogSession && dialog.open && !list.querySelector("[data-queue-id]")) {
+      list.innerHTML = `<p class="process-backlog-empty">读取失败：${esc(error.message || "请稍后重试")}</p>`;
+    }
+  } finally { backlogLoading = false; }
 }
 
 async function openProcessBacklog() {
   const dialog = $("#process-backlog-dialog");
   const list = $("#process-backlog-list");
   list.innerHTML = '<p class="process-backlog-empty">正在读取待处理列表…</p>';
+  if (dialog.open) return;
+  backlogSession += 1;
   dialog.showModal();
-  try {
-    renderProcessBacklog(await apiGet("/api/process/backlog"));
-  } catch (error) {
-    list.innerHTML = `<p class="process-backlog-empty">读取失败：${esc(error.message || "请稍后重试")}</p>`;
-  }
+  await refreshProcessBacklog();
 }
+$("#process-backlog-dialog").addEventListener("close", () => { backlogSession += 1; });
+setInterval(() => {
+  if (!$("#process-backlog-dialog").open) return;
+  updateProcessingTimers();
+  refreshProcessBacklog();
+}, 1000);
 
 function renderConfigButtons() {
   const list = Array.isArray(configurable) ? configurable : [];

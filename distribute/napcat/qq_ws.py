@@ -67,7 +67,7 @@ async def call_action(ws, action: str, params: dict, log=print,
     return {}
 
 
-async def send_private_msg(ws, user_id, message: str, log=print,
+async def send_private_msg(ws, user_id, message, log=print,
                            echo_prefix: str = "hx", attempts: int = 4,
                            per_try_timeout: float = 15.0) -> dict:
     """发私聊消息，返回 NapCat 响应（含 status/data）；超时返回 {}。"""
