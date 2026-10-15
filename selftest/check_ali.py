@@ -128,6 +128,9 @@ try:
     config_env.ENV_FILE = case / ".env"
     config_env.STATE_FILE = case / "state.json"
     groups.DB_FILE = case / "hx.sqlite3"
+    from distribute.alison.ali_core import delivery
+    delivery.STATE = case / 'delivery_progress.json'
+    delivery.STATE.unlink(missing_ok=True)
     alison_config.DB_FILE = groups.DB_FILE
     alison_config.INFO_INTERVAL = 0
 

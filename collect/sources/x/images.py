@@ -23,9 +23,11 @@ def download_image(tweet_id, url: str, idx: int = 0,
                 r = client.get(cand)
                 r.raise_for_status()
             fname = image_path(f"{tweet_id}_{idx}.jpg", day or datetime.now().strftime("%Y%m%d"))
-            fname.write_bytes(r.content)
+            from collect.image_store import store_image_bytes
+            stored = store_image_bytes(r.content, fname)
+            if not stored: return ''
             log(f"[图片OK] {tweet_id} 第{idx+1}张 下载成功 -> {fname.name}")
-            return str(fname)
+            return stored
         except Exception:
             continue
     log(f"[图片X ] {tweet_id} 第{idx+1}张 下载失败(重试全部后缀均失败)")

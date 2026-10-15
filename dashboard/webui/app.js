@@ -317,12 +317,13 @@ function formatTime(value) {
   return formatDate(value) || "—";
 }
 
-function imageUrl(path) {
+function imageUrl(path, item = null) {
   const normalized = String(path || "").replace(/\\/g, "/");
   const marker = "data/images/";
   const cut = normalized.lastIndexOf(marker);
   const relative = (cut >= 0 ? normalized.slice(cut + marker.length) : normalized).replace(/^\/+/, "");
-  return "/api/image/" + relative.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  const version = item?.image_versions?.[path];
+  return "/api/image/" + relative.split("/").filter(Boolean).map(encodeURIComponent).join("/") + (version ? `?v=${encodeURIComponent(version)}` : "");
 }
 
 function keyOf(item) {
@@ -332,7 +333,7 @@ function keyOf(item) {
 function buildItem(item) {
   const image = imageOf(item);
   const thumbnail = image
-    ? `<img class="thumb" src="${imageUrl(image)}" alt="内容图片" loading="lazy" decoding="async">`
+    ? `<img class="thumb" src="${imageUrl(image, item)}" alt="内容图片" loading="lazy" decoding="async">`
     : "";
 
   const element = document.createElement("article");
@@ -1105,7 +1106,7 @@ function openDetail(key) {
   const images = imageList(item);
   $("#detail-image-section").hidden = images.length === 0;
   $("#detail-images").innerHTML = images
-    .map((path) => `<figure><img src="${imageUrl(path)}" alt="内容图片"><figcaption>${esc(path)}</figcaption></figure>`)
+    .map((path) => `<figure><img src="${imageUrl(path, item)}" alt="内容图片"><figcaption>${esc(path)}</figcaption></figure>`)
     .join("");
 
   $("#detail-dialog").querySelector(".detail-scroll").scrollTop = 0;

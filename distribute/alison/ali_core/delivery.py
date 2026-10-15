@@ -13,7 +13,8 @@ LOCK = threading.Lock()
 
 def deliver_all_images(item, source, text, images, upload, send):
     from collect.image_filter import filter_image_paths
-    images = filter_image_paths(images)
+    from collect.image_store import deduplicate_message_images
+    images = deduplicate_message_images(filter_image_paths(images))
     identity = json.dumps([source, item.get('id'), item.get('rev'), text, images], ensure_ascii=False)
     key = hashlib.sha256(identity.encode('utf-8')).hexdigest()
     with LOCK:
@@ -33,21 +34,23 @@ def deliver_all_images(item, source, text, images, upload, send):
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=STATE.parent, delete=False) as handle:
                 temporary = Path(handle.name)
                 json.dump(progress, handle, ensure_ascii=False)
-            try: os.replace(temporary, STATE)
+            from collect.image_store import atomic_replace
+            try: atomic_replace(temporary, STATE)
             finally: temporary.unlink(missing_ok=True)
 
         try:
+            # 先独立发送正文与日期，随后每张图片独立发送。
+            if not entry['text_sent']:
+                if not send(text, ''): return False
+                entry['text_sent'] = True
+                checkpoint()
             if not images:
-                if not entry['text_sent']:
-                    if not send(text, ''): return False
-                    entry['text_sent'] = True
-                    checkpoint()
                 return True
             for index in range(entry['count'], len(images)):
                 file_info = upload(images[index])
                 if not file_info: return False
-                # 第一条包含正文和日期，其后的消息只追加配图。
-                if not send(text if not entry['text_sent'] else '', file_info): return False
+                # QQ 富媒体接口要求 content 非空，空格不会重复正文。
+                if not send(' ', file_info): return False
                 entry.update(text_sent=True, count=index+1)
                 checkpoint()
             return entry['text_sent'] and entry['count'] == len(images)

@@ -264,9 +264,11 @@ def _download_article_image(url: str, tweet_id: str, index: int, day: str, log) 
             if len(data) > MAX_IMAGE_BYTES:
                 raise ValueError("图片超过 15 MB 限制")
         path = image_path(f"{tweet_id}_link_{index}{suffix}", day)
-        path.write_bytes(data)
+        from collect.image_store import store_image_bytes
+        stored = store_image_bytes(data, path)
+        if not stored: return ''
         log(f"[引用图] 下载成功：{path.name}")
-        return str(path)
+        return stored
     except Exception as exc:
         log(f"[引用图] 下载失败：{url}：{exc}")
         return ""

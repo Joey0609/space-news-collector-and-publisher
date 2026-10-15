@@ -156,9 +156,10 @@ class Collector:
             if not suffix or not signatures.get(suffix):
                 raise CollectError("IMAGE_DOWNLOAD_ERROR", "响应不是有效图片")
             target = self.image_dir / (digest(url) + suffix)
-            atomic_bytes(target, response.content)
+            from collect.image_store import store_image_bytes
+            stored = await asyncio.to_thread(store_image_bytes, response.content, target, db.DB_FILE, self.image_dir.parent)
             self.store.clear_notice(source, url, "image")
-            return str(target)
+            return stored
         except Exception as exc:
             kind, detail = error_kind(exc)
             self.warn(source, url, "image", "IMAGE_DOWNLOAD_ERROR", f"{kind}: {detail}")

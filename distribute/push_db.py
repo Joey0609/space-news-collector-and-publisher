@@ -140,7 +140,8 @@ def _row_to_item(row) -> dict:
     item = dict(row)
     item["pushed"] = _parse_pushed(item.get("pushed"))
     from collect.image_filter import filter_image_paths
-    item["images"] = filter_image_paths(_parse_images(item.get("images")))
+    from collect.image_store import deduplicate_message_images
+    item["images"] = deduplicate_message_images(filter_image_paths(_parse_images(item.get("images"))),DB_FILE)
     score = item.get("ai_score")
     item["score"] = score if score is not None else 0
     return item

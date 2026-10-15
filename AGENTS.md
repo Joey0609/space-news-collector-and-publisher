@@ -215,3 +215,13 @@ P4/P5：完成第一版。看板后端和前端可本机启动，后续可继续
 AI 接入点独立设置处理间隔 `ANALYSIS_PAUSE_SECONDS` 和并行数量 `ANALYSIS_CONCURRENCY`（1至32，默认1）。`analyze_db.py` 调度独立的单条子进程，使用各自的 SQLite 连接，结果逐条提交；停止处理时必须停止整棵进程树。
 
 图片规则：`collect/image_filter.py` 使用 OpenCV 定位二维码，二维码区域并集超过整图面积50%时排除该图（不删除原文件）。采集写库及分发读取均过滤，识别结果按文件修改时间缓存。艾莉森按正文/日期/全部配图顺序发送，多图分消息追加，正文和全部图片成功才回报成功；部分发送进度保存在 `data/state/alison_delivery_progress.json`，重试继续未完成部分。
+
+## 共享图片库
+
+新图下载后进入 `collect/image_store.py`：二维码过滤、SHA-256精确复用、64位感知哈希分段索引、128像素压缩局部特征复核。静态不透明图片使用保守近似合并；动画、透明图、SVG等只精确复用。相似度不确定时分开保存。
+稳定路径为 `data/images/library/<id>.img`，保留原始编码字节；更清晰版本原子替换同一路径，版本与新闻rev同步更新。1024像素同尺度降噪细节分数与原始像素共同决定是否升级，插值放大和质量接近的版本不自动覆盖。
+新增表：`image_assets`（资产、格式、质量、特征、版本）、`image_signatures`（已见原始哈希）、`image_hash_buckets`（分段索引）、`image_refs`（新闻引用）、`image_pending`（崩溃恢复日志）。原有items字段不变。
+旧图工具 `tools/compact_images.py` 独立运行，默认预览，`--apply` 才暂停采集/处理/分发、备份台账、更新引用、核对并删除重复文件；不会自动启动服务，不接入启动扫描，不修改baseline或游标。完全停机后可用 `--apply --offline`。迁移映射在 `data/state/image_compaction.json`，报告在 `logs/image_compaction_report.json`。
+看板返回 `image_versions`，图片URL带版本号并按实际编码返回Content-Type；渠道状态增加 `inflight`，供旧图整理等待外部插件在途消息结束。QQ上传的文件名按编码生成扩展名。
+
+艾莉森最新发送顺序：正文和日期先作为独立文本消息发送，再逐张发送去重后的配图（图片消息content为空格，符合官方接口要求）。全部成功才确认已发；失败续传，不重复已成功的文字或图片。

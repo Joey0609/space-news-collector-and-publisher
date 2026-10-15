@@ -306,6 +306,10 @@ def _item_rows(where_sql: str, tail_sql: str, params: tuple, *, search: str = ""
                 row["images"] = []
         row["ori_url"] = row.get("ori_url") or ""
         row["images"] = [str(p) for p in (row.get("images") or []) if str(p).strip()]
+        row['image_versions'] = {}
+        for image in row['images']:
+            try: row['image_versions'][image] = str(Path(image).stat().st_mtime_ns)
+            except OSError: pass
         row["_stage"] = row.get("stage", "")
         # 分数统一取自 AI 完整分析
         score = row.get("ai_score")
@@ -859,7 +863,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         raw = target.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", content_types.get(target.suffix.lower(), "application/octet-stream"))
+        if target.suffix.lower() == '.img':
+            from collect.image_store import encoded_type
+            content_type = encoded_type(raw)[0]
+        else:
+            content_type = content_types.get(target.suffix.lower(), "application/octet-stream")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("ETag", etag)
         self.send_header("Cache-Control", cache_control)
@@ -1025,6 +1034,8 @@ class Handler(BaseHTTPRequestHandler):
                 item_id = int(payload.get("id"))
                 conn = sqlite3.connect(DATA / "hx.sqlite3")
                 conn.execute("DELETE FROM items WHERE id=?", (item_id,))
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='image_refs'").fetchone():
+                    conn.execute('DELETE FROM image_refs WHERE item_id=?',(item_id,))
                 conn.commit()
                 conn.close()
                 audit("item_delete", {"id": item_id})

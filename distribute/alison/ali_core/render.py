@@ -100,7 +100,7 @@ def build_text(item: dict) -> str:
         parts.append(body)
     if date:
         parts.append(date)
-    # QQ 富媒体消息会将 content 放在 media 图片之前；正文各段只用单换行。
+    # 正文及日期先独立发送，图片随后逐张发送；各段只用单换行。
     return "\n".join(parts)
 
 

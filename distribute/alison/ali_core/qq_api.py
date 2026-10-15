@@ -46,7 +46,9 @@ def upload_group_image(host: str, hdrs: dict, goid: str, path: str) -> str:
     md5 = hashlib.md5(data).hexdigest()
     sha1 = hashlib.sha1(data).hexdigest()
     md5_10m = _md5_10m(data)
-    fname = p.name
+    from collect.image_store import encoded_type
+    _, extension = encoded_type(data)
+    fname = p.stem + extension if p.suffix == '.img' else p.name
     log(f"[上传] {fname} ({size} bytes) 预上传...")
 
     r = httpx.post(f"{host}/v2/groups/{goid}/upload_prepare",
@@ -128,7 +130,7 @@ def send_group_rich(host: str, hdrs: dict, goid: str, text: str, file_info: str 
         return False
     if file_info:
         body = {"msg_type": 7, "content": text, "media": {"file_info": file_info}, "msg_seq": 1}
-        tag = "图文一条"
+        tag = "图文一条" if text.strip() else "图片"
     else:
         body = {"msg_type": 0, "content": text, "msg_seq": 1}
         tag = "纯文本"

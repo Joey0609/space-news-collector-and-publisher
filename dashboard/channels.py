@@ -322,6 +322,7 @@ def list_channels(db_file=None) -> list:
             "connected": bool(session and session.alive),
             "status": (session.status if session else ("未连接" if info["enabled"] else "已停用")),
             "pending": len(pending_ids),
+            "inflight": sum(len(slot) for slot in list(getattr(session,'inflight',{}).values())) if session else 0,
             "sent_total": sum(entry["sent_total"] for entry in targets),
             "targets": targets,
         })

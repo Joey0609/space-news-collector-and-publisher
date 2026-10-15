@@ -75,6 +75,19 @@ def reset(root=ROOT, seed=None, apply=False):
         columns = [r[1] for r in target.execute(f"PRAGMA table_info({table})")]
         for row in source.execute("SELECT " + ",".join(columns) + f" FROM {table}"):
             target.execute(f"INSERT INTO {table}(" + ",".join(columns) + ") VALUES(" + ",".join("?" for _ in columns) + ")", tuple(row))
+    if source.execute("SELECT 1 FROM sqlite_master WHERE name='image_assets'").fetchone():
+        kept_ids=[]
+        for asset in source.execute('SELECT * FROM image_assets'):
+            if Path(asset['path']).resolve() in keep_images:
+                keys=list(asset.keys())
+                target.execute('INSERT INTO image_assets('+','.join(keys)+') VALUES('+','.join('?' for _ in keys)+')',tuple(asset))
+                kept_ids.append(asset['id'])
+        for table in ('image_signatures','image_hash_buckets'):
+            for ident in kept_ids:
+                for record in source.execute(f'SELECT * FROM {table} WHERE asset_id=?',(ident,)):
+                    target.execute(f'INSERT INTO {table} VALUES('+','.join('?' for _ in record)+')',tuple(record))
+        from collect.image_store import sync_refs
+        for item in selected: sync_refs(target,item['id'],json.loads(item.get('images') or '[]'))
     registry = source.execute("SELECT value FROM meta WHERE key='push_sources'").fetchone()
     if registry:
         target.execute("INSERT INTO meta(key,value) VALUES('push_sources',?)", (registry[0],))
