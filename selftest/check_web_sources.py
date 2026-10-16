@@ -35,9 +35,6 @@ def page(text=BODY, extra=""):
 
 class ParsingTests(unittest.TestCase):
     def test_live_entrypoint_and_scoped_media_regressions(self):
-        rows, _, _ = feed_page(b'<a class="container__link--type-article" href="/2026/10/14/tech/story">News</a>',
-                               'https://edition.cnn.com/business/tech', 'CNN')
-        self.assertEqual(len(rows), 1)
         with self.assertRaises(CollectError) as error:
             feed_page(b'<html><title>One moment, please...</title></html>', 'https://spacepolicyonline.com/feed/', 'SPO')
         self.assertEqual(error.exception.kind, 'BOT_CHALLENGE')
@@ -63,7 +60,7 @@ class ParsingTests(unittest.TestCase):
             path = root / "state.sqlite3"
             initial = snapshot(path)
             self.assertFalse(path.exists())
-            self.assertEqual(len(initial["sources"]), 21)
+            self.assertEqual(len(initial["sources"]), 17)
             self.assertTrue(all(row["state"] == "never" for row in initial["sources"]))
             with closing(sqlite3.connect(path)) as conn:
                 conn.execute("CREATE TABLE source_status(source TEXT PRIMARY KEY,label TEXT,last_run REAL,state TEXT,discovered INTEGER,collected INTEGER)")
@@ -105,7 +102,7 @@ class ParsingTests(unittest.TestCase):
         from dashboard import server
         with patch("collect.sources._web.store.snapshot", side_effect=sqlite3.DatabaseError("bad database")):
             data = server.state()["collection"]
-        self.assertEqual(len(data["sources"]), 21)
+        self.assertEqual(len(data["sources"]), 17)
         self.assertTrue(all(row["state"] == "error" and row["stored_count"] is None for row in data["sources"]))
 
     def test_sina_cleanup_backup_and_source_scope(self):
@@ -152,8 +149,8 @@ class ParsingTests(unittest.TestCase):
             self.assertFalse(matches_title(title), title)
 
     def test_all_feeds_and_no_topic_filter(self):
-        self.assertEqual(len(RSS_FEEDS), 19)
-        self.assertEqual(len({row[0] for row in RSS_FEEDS}), 19)
+        self.assertEqual(len(RSS_FEEDS), 15)
+        self.assertEqual(len({row[0] for row in RSS_FEEDS}), 15)
         xml = '<rss><channel>' + ''.join(f'<item><guid>{i}</guid><title>航空 review {i}</title><link>https://example.test/{i}</link></item>' for i in range(40)) + '</channel></rss>'
         rows, _, errors = feed_page(xml, "https://example.test/feed", "Publisher")
         self.assertEqual(len(rows), 40)  # 不截前30条，也不筛标题。
@@ -338,14 +335,14 @@ class CollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_error_and_image_failure(self):
         url = "https://example.test/news"
         self.responses[url] = (403, "text/html", b'blocked')
-        self.add("rss:test")
-        self.assertIsNone(await self.collector.collect_candidate("rss:test", self.store.due("rss:test")[0]))
+        self.add("rss:spacenews")
+        self.assertIsNone(await self.collector.collect_candidate("rss:spacenews", self.store.due("rss:spacenews")[0]))
         self.assertEqual(snapshot(self.store.path)["warnings"][0]["error_type"], "HTTP_ERROR")
         other = "https://example.test/other"
         self.responses[other] = (200, "text/html", page(extra='<img src="/bad.png">').encode())
         self.responses["https://example.test/bad.png"] = (404, "text/html", b'not image')
-        self.add("rss:test", "other", other)
-        item = await self.collector.collect_candidate("rss:test", self.store.due("rss:test")[0])
+        self.add("rss:spacenews", "other", other)
+        item = await self.collector.collect_candidate("rss:spacenews", self.store.due("rss:spacenews")[0])
         self.assertIsNotNone(item)
         self.assertFalse(item["images"])
         self.assertTrue(any(row["error_type"] == "IMAGE_DOWNLOAD_ERROR" for row in snapshot(self.store.path)["warnings"]))
@@ -407,7 +404,7 @@ class CollectionTests(unittest.IsolatedAsyncioTestCase):
              patch.object(server, "queue_pending_count", return_value=0), patch.object(server.channel_hub, "list_channels", return_value=[]), \
              patch.object(server.channel_hub, "active_sources", return_value=[]), patch("collect.sources._web.store.snapshot", return_value=snapshot(self.store.path)):
             state = server.state()
-            self.assertEqual(len(state["collection"]["sources"]), 21)
+            self.assertEqual(len(state["collection"]["sources"]), 17)
             self.assertEqual(next(row for row in state["collection"]["sources"] if row["source"] == "snapi")["state"], "warning")
             self.assertEqual(server.summary()["collection"]["warnings"][0]["url"], start)
 

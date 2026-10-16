@@ -133,7 +133,7 @@ class Store:
 
 
 def source_inventory():
-    return [{"source": "rss:" + key, "label": label, "type": "网页列表" if key == "cnn_tech" else "RSS", "url": url}
+    return [{"source": "rss:" + key, "label": label, "type": "RSS", "url": url}
             for key, label, url in RSS_FEEDS] + [
                 {"source": "snapi", "label": "Spaceflight News API", "type": "API", "url": SNAPI_URL},
                 {"source": "sina", "label": "新浪科技", "type": "列表", "url": SINA_URL}]
@@ -178,15 +178,15 @@ def snapshot(path=None, news_path=None):
             for row in conn.execute("SELECT source,status,COUNT(*) AS n FROM candidates GROUP BY source,status"):
                 counts.setdefault(row["source"], {})[row["status"]] = row["n"]
             notices = [dict(row) for row in conn.execute("SELECT * FROM notices ORDER BY updated_at DESC")]
+    known = {row["source"] for row in source_inventory()}
+    counts = {source: stats for source, stats in counts.items() if source in known}
+    notices = [notice for notice in notices if notice["source"] in known]
     stored = None
     if news_path is not None and Path(news_path).exists():
         with closing(sqlite3.connect(Path(news_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
             stored = dict(conn.execute("SELECT source,COUNT(*) FROM items GROUP BY source"))
     rows, alive = [], {}
     inventory = source_inventory()
-    known = {row["source"] for row in inventory}
-    inventory += [{"source": source, "label": state.get("label") or source, "type": "其他", "url": ""}
-                  for source, state in states.items() if source not in known]
     for entry in inventory:
         source = entry["source"]
         row = {**entry, "last_run": 0, "state": "never", "discovered": 0, "collected": 0, **states.get(source, {})}

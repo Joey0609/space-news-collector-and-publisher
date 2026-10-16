@@ -49,8 +49,8 @@ def deliver_all_images(item, source, text, images, upload, send):
             for index in range(entry['count'], len(images)):
                 file_info = upload(images[index])
                 if not file_info: return False
-                # QQ 富媒体接口要求 content 非空，空格不会重复正文。
-                if not send(' ', file_info): return False
+                # 纯图片消息不附带占位空格，避免客户端显示多余空白行。
+                if not send('', file_info): return False
                 entry.update(text_sent=True, count=index+1)
                 checkpoint()
             return entry['text_sent'] and entry['count'] == len(images)

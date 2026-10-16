@@ -200,7 +200,7 @@ QQ 官方文档只提供[按 OpenID 获取指定群信息](https://bot.q.qq.com/
 
 此处 `source` 是采集来源键，不是渠道投递 source。失败候选不写入 `items`，不计入处理池或待发队列。看板只读采集账本；`warnings` 返回最近 50 条当前告警，详细采集日志仍写入 `logs/`。
 
-`collection.sources` 固定包含清单内全部 21 个网页来源，未运行的来源也返回，另保留账本中未知来源。每行新增 `type`、`url`、`started_at`、`stored_count`（当前主库本来源条数）、`total_collected`（账本已成功候选数）、`pending_count`、`failed_count`、`warning_count`、`last_error`。`state` 为 `never`（尚未采集）、`running`（采集中）、`ok`、`warning`、`error` 或 `interrupted`（上次采集进程已退出且未完成）。`last_run` 是最近采集进度更新时间；`discovered` 和 `collected` 分别表示本轮新增候选、本轮入库数量，采集中随候选登记和成功入库实时增长，失败收尾保留已完成的计数。正文失败和待采集分开统计，尚未运行不显示为失败。
+`collection.sources` 固定包含清单内全部 17 个网页来源，未运行的来源也返回。每行新增 `type`、`url`、`started_at`、`stored_count`（当前主库本来源条数）、`total_collected`（账本已成功候选数）、`pending_count`、`failed_count`、`warning_count`、`last_error`。`state` 为 `never`（尚未采集）、`running`（采集中）、`ok`、`warning`、`error` 或 `interrupted`（上次采集进程已退出且未完成）。`last_run` 是最近采集进度更新时间；`discovered` 和 `collected` 分别表示本轮新增候选、本轮入库数量，采集中随候选登记和成功入库实时增长，失败收尾保留已完成的计数。正文失败和待采集分开统计，尚未运行不显示为失败。
 
 采集配置增加 `WEB_COLLECT_INTERVAL_SECONDS`（默认 900，整数秒且至少 10）和 `SOURCES`（`x,rss,snapi,sina` 子集，空为全部）。web 与 X 独立调度，仍由一个“采集”服务统一启停；修改 SOURCES 后重启采集服务。采集启动仍需要手动操作，渠道协议和发送回执规则不变。
 

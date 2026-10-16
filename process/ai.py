@@ -465,8 +465,8 @@ def parse_analysis(output: str) -> dict:
     for key in ("zh", "title", "summary"):
         if not result[key]:
             raise ValueError("完整分析缺少有效 " + key)
-    if len(result["title"]) > 20:
-        raise ValueError("标题不能超过20字")
+    if len(result["title"]) > 25:
+        raise ValueError("标题不能超过25字")
     if result["importance"] not in {"高", "中", "低"}:
         raise ValueError("重要度必须为高/中/低")
     if type(data["score"]) is not int or not 0 <= data["score"] <= 100:

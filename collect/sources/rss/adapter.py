@@ -13,7 +13,7 @@ class RSSAdapter:
     async def collect(self, log=print, state=None):
         async with client() as http:
             collector = Collector(http, store=state, log=log)
-            # 限制订阅并发；单订阅自己的失败不影响其他 18 个入口。
+            # 限制订阅并发；单订阅自己的失败不影响其他入口。
             gate = asyncio.Semaphore(3)
             async def run(key, label, url):
                 async with gate:

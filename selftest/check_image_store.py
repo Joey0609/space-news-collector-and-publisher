@@ -122,10 +122,10 @@ class Tests(unittest.TestCase):
             sent.append((text,info));return info!='b.jpg'
         with patch.object(delivery,'STATE',self.root/'progress.json'),patch('collect.image_filter.filter_image_paths',side_effect=lambda paths:paths):
             self.assertFalse(delivery.deliver_all_images(item,'alison:group_test','正文\n日期',[str(a),str(b)],upload,send))
-            self.assertEqual(sent,[('正文\n日期',''),(' ','a.jpg'),(' ','b.jpg')])
+            self.assertEqual(sent,[('正文\n日期',''),('','a.jpg'),('','b.jpg')])
             sent.clear()
             self.assertTrue(delivery.deliver_all_images(item,'alison:group_test','正文\n日期',[str(a),str(b)],upload,lambda text,info:sent.append((text,info)) or True))
-            self.assertEqual(sent,[(' ','b.jpg')])
+            self.assertEqual(sent,[('','b.jpg')])
     def test_http_real_mime_and_cache_change(self):
         import threading,urllib.request
         from http.server import ThreadingHTTPServer

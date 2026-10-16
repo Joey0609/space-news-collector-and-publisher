@@ -46,21 +46,6 @@ def feed_page(content, base, publisher):
     raw_bytes = content if isinstance(content, bytes) else content.encode()
     if re.search(rb"<title>[^<]*(?:moment|checking|captcha)", raw_bytes, re.I):
         raise CollectError("BOT_CHALLENGE", "订阅入口返回浏览器访问验证页")
-    if urlsplit(base).hostname in {"edition.cnn.com", "www.cnn.com"} and "/business/tech" in urlsplit(base).path:
-        soup = BeautifulSoup(content, "html.parser")
-        rows = {}
-        for node in soup.select('a.container__link--type-article[href]'):
-            href = node.get("href", "")
-            if not re.search(r"/\d{4}/\d{2}/\d{2}/", href):
-                continue
-            absolute = normalize_url(href, base)
-            text = node.get_text(" ", strip=True)
-            if absolute not in rows or len(text) > len(rows[absolute]["title"]):
-                rows[absolute] = candidate(absolute, absolute, text, "CNN")
-        if not rows:
-            raise CollectError("FEED_INVALID", "CNN 官网列表未发现文章链接")
-        next_node = soup.select_one('a[rel="next"]')
-        return list(rows.values()), urljoin(base, next_node["href"]) if next_node else "", []
     try:
         root = ET.fromstring(content)
     except ET.ParseError as exc:
