@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS image_signatures(sha256 TEXT PRIMARY KEY,asset_id TEX
 CREATE INDEX IF NOT EXISTS image_signatures_asset ON image_signatures(asset_id);
 CREATE TABLE IF NOT EXISTS image_hash_buckets(band INTEGER,value INTEGER,asset_id TEXT,
  PRIMARY KEY(band,value,asset_id));
+CREATE TABLE IF NOT EXISTS image_crop_signatures(asset_id TEXT NOT NULL,phash TEXT NOT NULL,
+ PRIMARY KEY(asset_id,phash));
+CREATE INDEX IF NOT EXISTS image_crop_signatures_hash ON image_crop_signatures(phash,asset_id);
+CREATE TABLE IF NOT EXISTS image_crop_buckets(band INTEGER,value INTEGER,phash TEXT,asset_id TEXT,
+ PRIMARY KEY(band,value,phash,asset_id));
+CREATE INDEX IF NOT EXISTS image_crop_buckets_lookup ON image_crop_buckets(band,value,asset_id);
+CREATE TABLE IF NOT EXISTS image_local_features(asset_id TEXT PRIMARY KEY,points BLOB NOT NULL,
+ descriptors BLOB NOT NULL,point_count INTEGER NOT NULL,width INTEGER NOT NULL,height INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS image_refs(item_id INTEGER,asset_id TEXT,PRIMARY KEY(item_id,asset_id));
 CREATE INDEX IF NOT EXISTS image_refs_asset ON image_refs(asset_id,item_id);
 CREATE TABLE IF NOT EXISTS image_pending(id TEXT PRIMARY KEY,temporary TEXT NOT NULL,metadata TEXT NOT NULL);
@@ -53,6 +61,34 @@ def encoded_type(data):
     return 'application/octet-stream', '.bin'
 
 
+def _phash(gray):
+    dct = cv2.dct(cv2.resize(gray, (32,32), interpolation=cv2.INTER_AREA).astype(np.float32))[:8,:8]
+    bits = dct.flatten() > np.median(dct.flatten()[1:])
+    bits[0] = False
+    return ''.join(f'{byte:02x}' for byte in np.packbits(bits))
+
+
+def _crop_hashes(gray):
+    height, width = gray.shape[:2]
+    hashes = {_phash(gray)}
+    for fraction in (.70, .90):
+        crop_w=max(32,round(width*fraction)); crop_h=max(32,round(height*fraction))
+        xs=sorted({0,max(0,(width-crop_w)//2),max(0,width-crop_w)})
+        ys=sorted({0,max(0,(height-crop_h)//2),max(0,height-crop_h)})
+        for y in ys:
+            for x in xs:
+                hashes.add(_phash(gray[y:y+crop_h,x:x+crop_w]))
+    return sorted(hashes)
+
+
+def _pack_features(points, descriptors):
+    if points is None or descriptors is None or not len(points):
+        return '', ''
+    packed_points=zlib.compress(np.asarray(points,dtype='<f4').tobytes(),6)
+    packed_descriptors=zlib.compress(np.asarray(descriptors,dtype=np.uint8).tobytes(),6)
+    return packed_points.hex(),packed_descriptors.hex()
+
+
 def features(data):
     mime, _ = encoded_type(data)
     result = dict(sha256=hashlib.sha256(data).hexdigest(), mime=mime, width=0, height=0,
@@ -70,10 +106,17 @@ def features(data):
     image = cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR)
     height, width = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    dct = cv2.dct(cv2.resize(gray, (32,32), interpolation=cv2.INTER_AREA).astype(np.float32))[:8,:8]
-    bits = dct.flatten() > np.median(dct.flatten()[1:])
-    bits[0] = False
-    phash = ''.join(f'{byte:02x}' for byte in np.packbits(bits))
+    phash = _phash(gray)
+    crop_hashes = _crop_hashes(gray)
+    scale=min(1.0,1200.0/max(height,width))
+    feature_gray=cv2.resize(gray,(max(1,round(width*scale)),max(1,round(height*scale))),interpolation=cv2.INTER_AREA) if scale<1 else gray
+    detector=cv2.ORB_create(nfeatures=1200,scaleFactor=1.2,nlevels=8,fastThreshold=8)
+    keypoints,descriptors=detector.detectAndCompute(feature_gray,None)
+    if keypoints and descriptors is not None:
+        points=np.asarray([point.pt for point in keypoints],dtype=np.float32)
+    else:
+        points=np.empty((0,2),dtype=np.float32);descriptors=np.empty((0,32),dtype=np.uint8)
+    local_points,local_descriptors=_pack_features(points,descriptors)
     preview = cv2.resize(image, (128,128), interpolation=cv2.INTER_AREA)
     normalized = cv2.resize(gray, (1024,1024), interpolation=cv2.INTER_AREA if min(width,height)>=1024 else cv2.INTER_LINEAR)
     normalized = cv2.GaussianBlur(normalized, (5,5), 1.0)
@@ -84,34 +127,137 @@ def features(data):
     # 平坦区域的高频变化主要是噪声，不能把它当作新增细节。
     noise_energy=float(np.mean(laplacian[flat]**2))
     quality = max(0.0,float(laplacian.var())-1.5*noise_energy)
-    result.update(width=width,height=height,quality=quality,phash=phash,preview=(b'HXI1'+zlib.compress(preview.tobytes(),6)).hex())
+    result.update(width=width,height=height,quality=quality,phash=phash,crop_hashes=crop_hashes,
+                  local_points=local_points,local_descriptors=local_descriptors,
+                  local_width=feature_gray.shape[1],local_height=feature_gray.shape[0],
+                  preview=(b'HXI1'+zlib.compress(preview.tobytes(),6)).hex())
     return result
 
 
+def _feature_arrays(metadata):
+    points=metadata.get('local_points')
+    descriptors=metadata.get('local_descriptors')
+    if not points or not descriptors: return None,None
+    try:
+        points_blob=bytes.fromhex(points) if isinstance(points,str) else bytes(points)
+        descriptors_blob=bytes.fromhex(descriptors) if isinstance(descriptors,str) else bytes(descriptors)
+        points=np.frombuffer(zlib.decompress(points_blob),dtype='<f4').reshape(-1,2)
+        descriptors=np.frombuffer(zlib.decompress(descriptors_blob),dtype=np.uint8).reshape(-1,32)
+        if len(points)!=len(descriptors): return None,None
+        return points,descriptors
+    except (ValueError,zlib.error):
+        return None,None
+
+
+def _nonflat_mask(image):
+    gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY) if image.ndim==3 else image
+    smooth=cv2.GaussianBlur(gray,(7,7),1.4)
+    gx=cv2.Sobel(smooth,cv2.CV_32F,1,0,ksize=3)
+    gy=cv2.Sobel(smooth,cv2.CV_32F,0,1,ksize=3)
+    mask=(cv2.magnitude(gx,gy)>18).astype(np.uint8)
+    return cv2.dilate(mask,np.ones((9,9),np.uint8),iterations=1)
+
+
+def _preview_image(metadata):
+    value=metadata.get('preview')
+    if not value:return None
+    try:
+        data=bytes.fromhex(value) if isinstance(value,str) else bytes(value)
+        data=zlib.decompress(data[4:]) if data.startswith(b'HXI1') else data
+        return np.frombuffer(data,np.uint8).reshape(128,128,3)
+    except (ValueError,zlib.error):
+        return None
+
+
+def _near_full_frame_match(new,old):
+    if not new.get('phash') or not old.get('phash'):return None
+    if (int(new['phash'],16)^int(old['phash'],16)).bit_count()>8:return None
+    old_ratio=old['width']/old['height']
+    if abs(new['width']/new['height']-old_ratio)/old_ratio>.005:return None
+    a=_preview_image(new);b=_preview_image(old)
+    if a is None or b is None:return None
+    a=cv2.cvtColor(a,cv2.COLOR_BGR2GRAY).astype(np.float32)
+    b=cv2.cvtColor(b,cv2.COLOR_BGR2GRAY).astype(np.float32)
+    ma,mb=float(a.mean()),float(b.mean());va,vb=float(a.var()),float(b.var())
+    covariance=float(((a-ma)*(b-mb)).mean())
+    ssim=((2*ma*mb+6.5025)*(2*covariance+58.5225))/((ma*ma+mb*mb+6.5025)*(va+vb+58.5225))
+    if ssim<.88:return None
+    area=max(1.0,float(min(np.count_nonzero(_nonflat_mask(a.astype(np.uint8))),
+                           np.count_nonzero(_nonflat_mask(b.astype(np.uint8))))))
+    return {'new_area':area,'old_area':area,'inliers':0,'distance':1-ssim}
+
+
+def picture_match(new,old):
+    """Compression/crop resistant local match with RANSAC and common-canvas area."""
+    if not new.get('phash') or not old.get('phash'): return None
+    new_points,new_desc=_feature_arrays(new);old_points,old_desc=_feature_arrays(old)
+    if new_points is None or old_points is None or len(new_desc)<12 or len(old_desc)<12:
+        return _near_full_frame_match(new,old)
+    matcher=cv2.BFMatcher(cv2.NORM_HAMMING)
+    pairs=matcher.knnMatch(new_desc,old_desc,k=2)
+    good=[]
+    for pair in pairs:
+        if len(pair)==2 and pair[0].distance < .78*pair[1].distance:
+            good.append(pair[0])
+    if len(good)<16:return _near_full_frame_match(new,old)
+    source=np.float32([new_points[m.queryIdx] for m in good]).reshape(-1,1,2)
+    target=np.float32([old_points[m.trainIdx] for m in good]).reshape(-1,1,2)
+    scale=max(float(new.get('local_width') or 1),float(new.get('local_height') or 1),
+              float(old.get('local_width') or 1),float(old.get('local_height') or 1))/1000.0
+    homography,inlier_mask=cv2.findHomography(source,target,cv2.RANSAC,max(3.0,4.0*scale))
+    if homography is None or inlier_mask is None:return _near_full_frame_match(new,old)
+    inliers=int(inlier_mask.sum());ratio=inliers/max(1,len(good))
+    if inliers<16 or ratio<.18:return _near_full_frame_match(new,old)
+    nw,nh=int(new.get('local_width') or new['width']),int(new.get('local_height') or new['height'])
+    ow,oh=int(old.get('local_width') or old['width']),int(old.get('local_height') or old['height'])
+    corners=np.float32([[0,0],[nw,0],[nw,nh],[0,nh]]).reshape(-1,1,2)
+    projected=cv2.perspectiveTransform(corners,homography)
+    old_corners=np.float32([[0,0],[ow,0],[ow,oh],[0,oh]]).reshape(-1,1,2)
+    new_poly=projected.reshape(-1,2).astype(np.float32)
+    old_poly=old_corners.reshape(-1,2).astype(np.float32)
+    if not np.isfinite(new_poly).all() or np.max(np.abs(new_poly))>max(ow,oh)*20:return None
+    new_area=abs(float(cv2.contourArea(new_poly)));old_area=float(ow*oh)
+    if new_area<=0 or old_area<=0:return None
+    overlap=abs(float(cv2.intersectConvexConvex(new_poly,old_poly)[0]))
+    if overlap/min(new_area,old_area)<.16:return None
+    minimum=np.minimum(new_poly.min(axis=0),old_poly.min(axis=0))
+    maximum=np.maximum(new_poly.max(axis=0),old_poly.max(axis=0))
+    canvas_w=max(1,int(np.ceil(maximum[0]-minimum[0])));canvas_h=max(1,int(np.ceil(maximum[1]-minimum[1])))
+    if canvas_w*canvas_h>1200*1200*16:return None
+    canvas_scale=min(1.0,1400.0/max(canvas_w,canvas_h))
+    shift=np.array([[1,0,-minimum[0]],[0,1,-minimum[1]],[0,0,1]],dtype=np.float64)
+    resize=np.diag([canvas_scale,canvas_scale,1.0])
+    transform=resize@shift
+    h_new=transform@homography
+    h_old=transform
+    out_w=max(1,int(round(canvas_w*canvas_scale)));out_h=max(1,int(round(canvas_h*canvas_scale)))
+    new_preview=_preview_image(new);old_preview=_preview_image(old)
+    if new_preview is not None and old_preview is not None:
+        new_mask=_nonflat_mask(new_preview);old_mask=_nonflat_mask(old_preview)
+        to_new=np.diag([nw/128.0,nh/128.0,1.0])
+        to_old=np.diag([ow/128.0,oh/128.0,1.0])
+        a=cv2.warpPerspective(new_mask,transform@homography@to_new,(out_w,out_h),flags=cv2.INTER_NEAREST)
+        b=cv2.warpPerspective(old_mask,transform@to_old,(out_w,out_h),flags=cv2.INTER_NEAREST)
+        new_coverage=float(np.count_nonzero(a));old_coverage=float(np.count_nonzero(b))
+    else:
+        new_coverage=new_area*canvas_scale*canvas_scale
+        old_coverage=old_area*canvas_scale*canvas_scale
+    if min(new_coverage,old_coverage)<=0:return None
+    return {'new_area':new_coverage,'old_area':old_coverage,'inliers':inliers,'distance':float(np.mean([m.distance for m in good]))}
+
+
 def same_picture(new, old):
-    if not new['phash'] or not old['phash']: return False
-    if (int(new['phash'],16)^int(old['phash'],16)).bit_count()>6: return False
-    if abs(new['width']/new['height'] - old['width']/old['height']) / (old['width']/old['height']) > .005: return False
-    def unpack(value): return zlib.decompress(value[4:]) if value.startswith(b'HXI1') else value
-    a=np.frombuffer(unpack(bytes.fromhex(new['preview'])),np.uint8).reshape(128,128,3)
-    b=np.frombuffer(unpack(old['preview']),np.uint8).reshape(128,128,3)
-    # 降噪后比较每个局部块；文字、水印、裁剪变化不能被全图平均值掩盖。
-    a=cv2.GaussianBlur(a,(5,5),1).astype(np.float32)
-    b=cv2.GaussianBlur(b,(5,5),1).astype(np.float32)
-    if float(np.abs(a-b).mean())>2.0: return False
-    for y in range(0,128,16):
-        for x in range(0,128,16):
-            aa=a[y:y+16,x:x+16]; bb=b[y:y+16,x:x+16]
-            if float(np.abs(aa-bb).mean())>5.0: return False
-            ma,mb=float(aa.mean()),float(bb.mean())
-            va,vb=float(aa.var()),float(bb.var())
-            covariance=float(((aa-ma)*(bb-mb)).mean())
-            ssim=((2*ma*mb+6.5025)*(2*covariance+58.5225))/((ma*ma+mb*mb+6.5025)*(va+vb+58.5225))
-            if ssim < .96: return False
-    return True
+    return picture_match(new,old) is not None
 
 
 def better_picture(new,old):
+    match=picture_match(new,old)
+    if match:
+        new_area,old_area=match['new_area'],match['old_area']
+        if new_area>old_area*1.05:return True
+        if old_area>new_area*1.05:return False
+        if new['quality']>old['quality']*1.02:return True
+        if old['quality']>new['quality']*1.02:return False
     pixels=new['width']*new['height']; previous=old['width']*old['height']
     if not previous or not pixels: return False
     return ((pixels>=previous and new['quality']>max(old['quality']*1.10,old['quality']+.05))
@@ -176,10 +322,29 @@ class ImageStore:
         conn.execute('DELETE FROM image_pending WHERE id=?',(ident,))
         conn.commit()
 
-    def _signature(self,conn,ident,metadata):
+    def _signature(self,conn,ident,metadata,replace_features=True):
         conn.execute('INSERT OR IGNORE INTO image_signatures VALUES(?,?,?)',(metadata['sha256'],ident,metadata['phash']))
         for band,value in enumerate(bytes.fromhex(metadata['phash'])):
             conn.execute('INSERT OR IGNORE INTO image_hash_buckets VALUES(?,?,?)',(band,value,ident))
+        crop_hashes=metadata.get('crop_hashes') or ([metadata['phash']] if metadata.get('phash') else [])
+        for phash in crop_hashes:
+            if not phash:continue
+            conn.execute('INSERT OR IGNORE INTO image_crop_signatures VALUES(?,?)',(ident,phash))
+            for band,value in enumerate(bytes.fromhex(phash)):
+                conn.execute('INSERT OR IGNORE INTO image_crop_buckets VALUES(?,?,?,?)',(band,value,phash,ident))
+        points=metadata.get('local_points');descriptors=metadata.get('local_descriptors')
+        if points and descriptors:
+            point_blob=bytes.fromhex(points);descriptor_blob=bytes.fromhex(descriptors)
+            count=len(zlib.decompress(point_blob))//8
+            values=(ident,point_blob,descriptor_blob,count,int(metadata.get('local_width') or metadata['width']),
+                    int(metadata.get('local_height') or metadata['height']))
+            if replace_features:
+                conn.execute('''INSERT INTO image_local_features(asset_id,points,descriptors,point_count,width,height)
+                  VALUES(?,?,?,?,?,?) ON CONFLICT(asset_id) DO UPDATE SET points=excluded.points,
+                  descriptors=excluded.descriptors,point_count=excluded.point_count,width=excluded.width,height=excluded.height''',values)
+            else:
+                conn.execute('''INSERT OR IGNORE INTO image_local_features(asset_id,points,descriptors,point_count,width,height)
+                  VALUES(?,?,?,?,?,?)''',values)
 
     def recover(self,conn):
         for row in conn.execute('SELECT * FROM image_pending').fetchall():
@@ -191,23 +356,63 @@ class ImageStore:
                 raise RuntimeError('图片升级尚未恢复，停止写入以保护原图')
             self._finalize(conn,row['id'],metadata)
 
+    def _asset_features(self,conn,asset):
+        row=conn.execute('SELECT * FROM image_local_features WHERE asset_id=?',(asset['id'],)).fetchone()
+        if row:
+            asset=dict(asset)
+            asset.update(local_points=bytes(row['points']).hex(),local_descriptors=bytes(row['descriptors']).hex(),
+                         local_width=row['width'],local_height=row['height'])
+            return asset
+        path=Path(asset['path'])
+        if not path.is_file():return asset
+        try:
+            prepared=features(path.read_bytes())
+            self._signature(conn,asset['id'],prepared)
+            conn.commit()
+            asset=dict(asset);asset.update({key:prepared[key] for key in ('local_points','local_descriptors','local_width','local_height','crop_hashes')})
+        except (OSError,ValueError,cv2.error):
+            pass
+        return asset
+
+    def index_existing(self,path):
+        """Refresh crop hashes and local descriptors without replacing a managed file."""
+        path=Path(path).resolve()
+        with self.locked(),contextlib.closing(self.connect()) as conn:
+            row=conn.execute('SELECT * FROM image_assets WHERE path=?',(str(path),)).fetchone()
+            if row is None or not path.is_file():return False
+            metadata=features(path.read_bytes())
+            self._signature(conn,row['id'],metadata)
+            conn.commit()
+            return True
+
     def candidate(self,conn,metadata):
         exact=conn.execute('SELECT a.* FROM image_signatures s JOIN image_assets a ON a.id=s.asset_id WHERE s.sha256=?',(metadata['sha256'],)).fetchone()
         if exact and (Path(exact['path']).is_file() or exact['sha256']==metadata['sha256']): return exact
         if not metadata['phash']: return None
         votes={}
-        for band,value in enumerate(bytes.fromhex(metadata['phash'])):
-            for row in conn.execute('SELECT asset_id FROM image_hash_buckets WHERE band=? AND value=?',(band,value)):
-                votes[row[0]]=votes.get(row[0],0)+1
+        probes=metadata.get('crop_hashes') or [metadata['phash']]
+        for phash in probes:
+            for band,value in enumerate(bytes.fromhex(phash)):
+                for row in conn.execute('SELECT phash,asset_id FROM image_crop_buckets WHERE band=? AND value=?',(band,value)):
+                    key=(row['asset_id'],row['phash'])
+                    votes[key]=votes.get(key,0)+1
+                # Existing libraries have only full-image hash buckets until refreshed.
+                for row in conn.execute('SELECT asset_id FROM image_hash_buckets WHERE band=? AND value=?',(band,value)):
+                    key=(row['asset_id'],phash)
+                    votes[key]=votes.get(key,0)+1
+        probe_ints=[int(value,16) for value in probes]
+        candidate_ids={ident for (ident,stored_hash),count in votes.items()
+                       if count>=2 and stored_hash and min((int(stored_hash,16)^value).bit_count() for value in probe_ints)<=28}
         matches=[]
-        for ident,count in votes.items():
-            if count<2: continue
-            brief=conn.execute('SELECT phash,width,height FROM image_assets WHERE id=?',(ident,)).fetchone()
-            if not brief or not brief['phash'] or (int(brief['phash'],16)^int(metadata['phash'],16)).bit_count()>6: continue
+        for ident in candidate_ids:
             old=conn.execute('SELECT * FROM image_assets WHERE id=?',(ident,)).fetchone()
-            if old and Path(old['path']).is_file() and same_picture(metadata,old): matches.append(old)
-        # 有多个候选时先选最接近者，避免不同图片组被串联成一组。
-        return min(matches,key=lambda r:(int(r['phash'],16)^int(metadata['phash'],16)).bit_count()) if matches else None
+            if not old or not Path(old['path']).is_file():continue
+            old=self._asset_features(conn,old)
+            match=picture_match(metadata,old)
+            if match:matches.append((match,old))
+        if not matches:return None
+        # Maximize geometric confidence first; coverage comparison runs only after confirmation.
+        return max(matches,key=lambda pair:(pair[0]['inliers'],pair[0]['new_area']+pair[0]['old_area']))[1]
 
     def store(self,data, fallback_path=None, prepared=None):
         metadata=prepared or features(data)
@@ -215,7 +420,7 @@ class ImageStore:
             self.recover(conn)
             old=self.candidate(conn,metadata)
             if old and Path(old['path']).is_file() and (old['sha256']==metadata['sha256'] or not better_picture(metadata,old)):
-                self._signature(conn,old['id'],metadata); conn.commit()
+                self._signature(conn,old['id'],metadata,replace_features=False); conn.commit()
                 return old['path']
             ident=old['id'] if old else uuid.uuid4().hex
             with tempfile.NamedTemporaryFile(dir=self.library,suffix='.pending',delete=False) as handle:
@@ -259,6 +464,10 @@ def deduplicate_message_images(paths,database=None):
                     row=conn.execute('SELECT * FROM image_assets WHERE path=?',(str(value),)).fetchone()
                     if row:
                         metadata=dict(row);metadata['preview']=row['preview'].hex()
+                        local=conn.execute('SELECT * FROM image_local_features WHERE asset_id=?',(row['id'],)).fetchone()
+                        if local:
+                            metadata.update(local_points=bytes(local['points']).hex(),local_descriptors=bytes(local['descriptors']).hex(),
+                                            local_width=local['width'],local_height=local['height'])
                         indexed[str(value)]=metadata
     groups=[]
     for value in paths:

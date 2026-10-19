@@ -6,3 +6,5 @@ twscrape
 openai
 websockets
 opencv-python-headless>=4.10,<5
+sentence-transformers>=3.0,<6
+usearch>=2.16,<3

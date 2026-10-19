@@ -81,7 +81,9 @@ def compact(root,apply=False):
         files=sorted((p for p in image_root.rglob('*') if p.is_file() and p.suffix.lower() in ('.jpg','.jpeg','.png','.webp','.avif','.gif','.svg','.img')),key=lambda p:('library' not in p.parts,str(p)))
         for path in files:
             path=path.resolve();path.relative_to(image_root)
-            if apply and path.parent==store.library: continue
+            if apply and path.parent==store.library:
+                store.index_existing(path)
+                continue
             data=path.read_bytes()
             metadata=features(data)
             previous=manifest['mapping'].get(str(path))
@@ -133,7 +135,9 @@ def compact(root,apply=False):
                 asset=conn.execute('SELECT * FROM image_assets WHERE path=?',(path,)).fetchone()
                 if asset:
                     original=next((source for source in sources if manifest['source_hashes'].get(source)==asset['sha256']),None)
-                    winners.append({'path':path,'preferred_source':original,'sources':sources,'width':asset['width'],'height':asset['height'],'quality':asset['quality'],'bytes':asset['byte_size']})
+                    winners.append({'path':path,'preferred_source':original,'sources':sources,
+                                    'duplicate_sources':[source for source in sources if source!=original],
+                                    'width':asset['width'],'height':asset['height'],'quality':asset['quality'],'bytes':asset['byte_size']})
         report={'apply':apply,'scanned':len(files),'groups':len(groups),'duplicates':sum(max(0,len(paths)-1) for paths in groups.values()),'affected_items':changed,'bytes_freed' if apply else 'estimated_bytes_freed':saved,'skipped':skipped,'mapping':manifest['mapping'],'winners':winners}
         if not apply:
             # 报告显示拟使用的库路径，不泄露已清理的临时预览目录。

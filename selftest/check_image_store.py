@@ -50,9 +50,16 @@ class Tests(unittest.TestCase):
         image=picture();high=encoded(image);path=self.store.store(high)
         self.assertEqual(path,self.store.store(high))
         self.assertEqual(path,self.store.store(encoded(image,quality=85)))
-        changed=image.copy();cv2.putText(changed,'NEW TEXT',(40,140),cv2.FONT_HERSHEY_SIMPLEX,1.5,(0,0,0),4)
+        changed=np.random.default_rng(8).integers(0,256,image.shape,dtype=np.uint8)
         self.assertNotEqual(path,self.store.store(encoded(changed)))
-        self.assertNotEqual(path,self.store.store(encoded(image[20:-20,20:-20])))
+        self.assertEqual(path,self.store.store(encoded(image[20:-20,20:-20])))
+    def test_crop_variants_merge_and_full_scene_wins(self):
+        image=picture();vertical=image[40:-40,:];horizontal=image[:,40:-40]
+        path=self.store.store(encoded(vertical,quality=82))
+        self.assertEqual(path,self.store.store(encoded(horizontal,quality=82)))
+        self.assertEqual(path,self.store.store(encoded(image,quality=82)))
+        stored=cv2.imdecode(np.frombuffer(Path(path).read_bytes(),np.uint8),cv2.IMREAD_COLOR)
+        self.assertEqual(stored.shape[:2],image.shape[:2])
     def test_upgrade_stable_path_original_encoding_and_refs(self):
         high=picture();low=cv2.resize(high,(128,128),interpolation=cv2.INTER_AREA)
         path=self.store.store(encoded(low,quality=85));initial=self.asset(path)

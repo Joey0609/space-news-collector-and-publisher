@@ -6,6 +6,17 @@ from collect.paths import DB_FILE
 SCHEMA='''CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY,platform TEXT DEFAULT '',source TEXT DEFAULT '',origin_id TEXT,dedup_key TEXT UNIQUE,account TEXT,orig_account TEXT,forward_comment TEXT,quoted_account TEXT DEFAULT '',quoted_raw TEXT DEFAULT '',quoted_zh TEXT DEFAULT '',quoted_url TEXT DEFAULT '',ts INTEGER,date TEXT,content_type TEXT,raw TEXT,zh TEXT DEFAULT '',ai_tags TEXT DEFAULT '',repeat_of TEXT DEFAULT '',ai_title TEXT DEFAULT '',ai_summary TEXT DEFAULT '',importance TEXT DEFAULT '',analysis_attempts INTEGER DEFAULT 0,analysis_error TEXT DEFAULT '',ori_url TEXT,images TEXT DEFAULT '[]',decision TEXT,invalid_reason TEXT DEFAULT '',stage TEXT DEFAULT 'collected',collected_at TEXT,processed_at TEXT,rev INTEGER DEFAULT 1,ai_score INTEGER,pushed TEXT DEFAULT '{}');CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT);CREATE TABLE IF NOT EXISTS pushes(id INTEGER PRIMARY KEY,item_id INTEGER,channel TEXT DEFAULT '',kind TEXT DEFAULT '',source TEXT,sent_at TEXT,UNIQUE(source,item_id));CREATE TABLE IF NOT EXISTS channels(id TEXT PRIMARY KEY,label TEXT DEFAULT '',adapter TEXT DEFAULT 'plugin',command TEXT DEFAULT '',enabled INTEGER DEFAULT 1,targets TEXT DEFAULT '[]',last_seen TEXT DEFAULT '',note TEXT DEFAULT '');CREATE TABLE IF NOT EXISTS alison_groups(group_openid TEXT PRIMARY KEY,group_name TEXT DEFAULT '',group_finger_memo TEXT DEFAULT '',group_class_text TEXT DEFAULT '',group_tags TEXT DEFAULT '[]',group_member_num INTEGER,joined_at TEXT DEFAULT '',is_member INTEGER DEFAULT 1,push_enabled INTEGER DEFAULT 0,last_checked TEXT DEFAULT '',last_error TEXT DEFAULT '',updated_at TEXT DEFAULT '');CREATE TABLE IF NOT EXISTS processing_events(item_id INTEGER PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,available_at REAL NOT NULL DEFAULT 0);'''
 
 SCHEMA += """CREATE TABLE IF NOT EXISTS push_attempts(id INTEGER PRIMARY KEY,item_id INTEGER NOT NULL,channel TEXT NOT NULL,kind TEXT NOT NULL,source TEXT NOT NULL,attempted_at TEXT NOT NULL,status TEXT NOT NULL,detail TEXT DEFAULT '');"""
+SCHEMA += """CREATE TABLE IF NOT EXISTS item_embeddings(
+ index_key INTEGER PRIMARY KEY AUTOINCREMENT,
+ item_id INTEGER NOT NULL UNIQUE,
+ model_version TEXT NOT NULL,
+ input_hash TEXT NOT NULL,
+ dimensions INTEGER NOT NULL,
+ vector BLOB NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS item_embeddings_model ON item_embeddings(model_version,item_id);
+"""
 from collect.image_store import SCHEMA as IMAGE_SCHEMA
 SCHEMA += IMAGE_SCHEMA
 
@@ -92,6 +103,7 @@ def upsert_raw(item):
    c.execute('''UPDATE items SET images=?,content_type=?,quoted_url=?,rev=COALESCE(rev,0)+1 WHERE id=?''',
     (values['images'],values['content_type'],values['quoted_url'],item_id))
  if text_changed and values['raw'].strip():
+  c.execute('DELETE FROM item_embeddings WHERE item_id=?',(item_id,))
   enqueue_processing_event(c,item_id)
  from collect.image_store import sync_refs
  sync_refs(c,item_id,json.loads(values['images']))

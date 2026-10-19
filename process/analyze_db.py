@@ -17,6 +17,7 @@ import config as runtime_config
 from collect.db import open_db
 from process.analysis_contract import processing_required
 from collect.db import ensure_processing_event
+from process import embedding
 from process.logging_util import make_log, one_line, setup_console_encoding
 log = make_log(ROOT / "logs" / "analysis.log")
 PROGRESS_FILE = ROOT / "data" / "state" / "process_progress.json"
@@ -69,10 +70,18 @@ def _input_sql():
 def _input_args(item):
     return (item["id"],item.get("raw"),item.get("account"),item.get("quoted_raw"),item.get("quoted_account"))
 
-def save_ok(conn, item, analysis, attempts, generation):
+def save_ok(conn, item, analysis, attempts, generation, embedding_context=None):
     """事务内确认对应 generation；旧版本回复不能覆盖新采集。"""
     cursor = conn.execute("UPDATE items SET zh=?,quoted_zh=?,ai_title=?,ai_summary=?,importance=?,ai_score=?,ai_tags=?,repeat_of=?,decision=?,invalid_reason=?,stage='processed',analysis_attempts=?,analysis_error='',processed_at=?,rev=rev+1 WHERE " + _input_sql() + " AND EXISTS(SELECT 1 FROM processing_events WHERE item_id=items.id AND generation=?)",(analysis["zh"],analysis["quoted_zh"],analysis["title"],analysis["summary"],analysis["importance"],analysis["score"],json.dumps(analysis["tags"],ensure_ascii=False),analysis["repeat_of"],analysis["decision"],analysis["invalid_reason"],attempts,datetime.now().isoformat(timespec="seconds"),*_input_args(item),generation))
     if cursor.rowcount == 1:
+        conn.execute("SAVEPOINT optional_embedding")
+        try:
+            embedding.save_embedding(conn, item, embedding_context)
+            conn.execute("RELEASE SAVEPOINT optional_embedding")
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT optional_embedding")
+            conn.execute("RELEASE SAVEPOINT optional_embedding")
+            log(f"[embedding] item={item['id']} 向量未保存，分析结果仍提交：{one_line(str(exc))}")
         conn.execute("DELETE FROM processing_events WHERE item_id=? AND generation=?",(item["id"],generation))
         return True
     return False
@@ -100,7 +109,7 @@ def cleanup_events(conn, item_ids=None):
     conn.commit()
 
 
-def analysis_pass(conn, item_ids=None):
+def analysis_pass(conn, item_ids=None, embedding_context_file=None):
     cleanup_events(conn, item_ids)
     todo = pending_rows(conn,item_ids)
     ok = failed = skipped = 0
@@ -117,6 +126,17 @@ def analysis_pass(conn, item_ids=None):
         item['_processing_started_at'] = time.time()
         item['_processing_generation'] = generation
         write_progress(True,'正在完整分析',item,index,len(todo))
+        context = embedding.read_context(embedding_context_file, item) if embedding_context_file else None
+        if context is None and embedding_context_file:
+            context = embedding.unavailable_context(item, '并行上下文与当前输入版本不匹配')
+        elif context is None:
+            try:
+                context = embedding.prepare(item, conn)
+            except Exception as exc:
+                context = embedding.unavailable_context(item, exc)
+        candidate_titles = context.get('candidates', []) if context.get('available') else []
+        if not context.get('available') or context.get('indexed_count', 0) == 0:
+            candidate_titles = known_titles(conn,item['id'],AI_REPEAT_CONTEXT)
         attempts = int(item['analysis_attempts'] or 0)
         analysis = None
         error = None
@@ -128,7 +148,7 @@ def analysis_pass(conn, item_ids=None):
             visit += 1
             attempts += 1
             try:
-                analysis = analyze_item(item['raw'],item.get('account') or '',known_titles(conn,item['id'],AI_REPEAT_CONTEXT),item.get('quoted_account') or '',item.get('quoted_raw') or '',repair_hint=hint)
+                analysis = analyze_item(item['raw'],item.get('account') or '',candidate_titles,item.get('quoted_account') or '',item.get('quoted_raw') or '',repair_hint=hint)
                 break
             except Exception as exc:
                 error = exc
@@ -142,9 +162,11 @@ def analysis_pass(conn, item_ids=None):
                     time.sleep(max(0,ANALYSIS_RATE_LIMIT_WAIT))
                 elif visit < limit and ANALYSIS_PAUSE_SECONDS > 0: time.sleep(ANALYSIS_PAUSE_SECONDS)
         if analysis:
-            saved = save_ok(conn,item,analysis,attempts,generation)
+            saved = save_ok(conn,item,analysis,attempts,generation,context)
             conn.commit()
             if saved:
+                if context.get('available') and not IS_WORKER:
+                    embedding.sync_committed(conn,item['id'])
                 ok += 1
                 log(f"[分析完成 {index}/{len(todo)}] item={item['id']} {analysis['decision']} | {analysis['title']} | {analysis['invalid_reason']}")
             else:
@@ -165,6 +187,7 @@ def parallel_pass(conn, item_ids=None):
     todo = deque(pending_rows(conn, item_ids))
     total = len(todo)
     running = {}
+    context_files = {}
     available = [0.0] * runtime_config.ANALYSIS_CONCURRENCY
     capacity = runtime_config.ANALYSIS_CONCURRENCY
     result = {'ok': 0, 'failed': 0, 'skipped': 0}
@@ -181,11 +204,16 @@ def parallel_pass(conn, item_ids=None):
             for process, item in list(running.items()):
                 if process.poll() is None: continue
                 del running[process]
+                context_file = context_files.pop(process, None)
+                if context_file:
+                    Path(context_file).unlink(missing_ok=True)
                 available.append(now + pause)
                 completed += 1
                 row = conn.execute('SELECT * FROM items WHERE id=?', (item['id'],)).fetchone()
                 key = 'skipped' if row is None else ('failed' if processing_required(dict(row)) else 'ok')
                 result[key] += 1
+                if key == 'ok':
+                    embedding.sync_committed(conn,item['id'])
                 if process.returncode:
                     event = conn.execute('SELECT generation FROM processing_events WHERE item_id=?', (item['id'],)).fetchone()
                     if event: defer_event(conn, item['id'], event['generation']); conn.commit()
@@ -196,13 +224,19 @@ def parallel_pass(conn, item_ids=None):
             available.sort()
             while todo and len(running) < limit and available and available[0] <= now:
                 item = dict(todo[0])
+                context_file = embedding.write_context(item, conn)
                 item['_processing_started_at'] = time.time()
                 event = conn.execute('SELECT generation FROM processing_events WHERE item_id=?', (item['id'],)).fetchone()
                 item['_processing_generation'] = event['generation'] if event else None
-                process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--worker', '--item-ids', str(item['id'])], cwd=ROOT)
+                command = [sys.executable, str(Path(__file__).resolve()), '--worker']
+                if context_file:
+                    command += ['--embedding-context-file', str(context_file)]
+                command += ['--item-ids', str(item['id'])]
+                process = subprocess.Popen(command, cwd=ROOT)
                 todo.popleft()
                 available.pop(0)
                 running[process] = item
+                context_files[process] = context_file
                 write_progress(True, f'并行处理中 {len(running)}，已完成 {completed}/{total}',
                                index=completed, total=total, active_items=list(running.values()))
             if todo or running: time.sleep(0.1)
@@ -212,6 +246,9 @@ def parallel_pass(conn, item_ids=None):
                 process.terminate()
                 try: process.wait(timeout=5)
                 except subprocess.TimeoutExpired: process.kill(); process.wait()
+            context_file = context_files.get(process)
+            if context_file:
+                Path(context_file).unlink(missing_ok=True)
     return result
 
 
@@ -219,6 +256,7 @@ def main():
     global IS_WORKER
     parser = argparse.ArgumentParser()
     parser.add_argument('--item-ids')
+    parser.add_argument('--embedding-context-file')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     ids = None if args.item_ids is None else list(dict.fromkeys(int(v) for v in args.item_ids.split(',') if v.strip().isdigit()))
@@ -244,7 +282,7 @@ def main():
         summary = config_summary()
         if not IS_WORKER:
             log(f"[完整分析] 模型={summary['model']} 待分析={len(pending_rows(conn,ids))} 并行={runtime_config.ANALYSIS_CONCURRENCY} 间隔={runtime_config.ANALYSIS_PAUSE_SECONDS}秒")
-        result = analysis_pass(conn,ids) if IS_WORKER else parallel_pass(conn,ids)
+        result = analysis_pass(conn,ids,args.embedding_context_file) if IS_WORKER else parallel_pass(conn,ids)
         if not IS_WORKER: log(f"[本轮结果] 完成{result['ok']}，失败待重试{result['failed']}，跳过{result['skipped']}")
         return 0
     finally:
