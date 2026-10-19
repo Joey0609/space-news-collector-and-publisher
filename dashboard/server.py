@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -825,6 +826,69 @@ def update_item(payload: dict) -> None:
     audit('item_update',{'id':item_id,'fields':sorted(values)})
 
 
+def picdb_images(offset: int = 0, limit: int = 48, mode: str = "all", query: str = "") -> dict:
+    """Read one page of unique managed image assets for the standalone image library."""
+    from collect.db import open_db
+    from collect.image_store import MAX_INVALID_IMAGE_PIXELS
+
+    mode = mode if mode in {"all", "blacklist"} else "all"
+    query = str(query or "").strip()[:100]
+    limit = min(100, max(1, int(limit)))
+    offset = max(0, int(offset))
+    conn = open_db()
+    try:
+        clauses = []
+        params = []
+        if mode == "blacklist":
+            clauses.append("EXISTS(SELECT 1 FROM image_blacklist b WHERE b.asset_id=a.id)")
+        clauses.append("NOT (COALESCE(a.width,0)>0 AND COALESCE(a.height,0)>0 AND a.width*a.height<=?)")
+        params.append(MAX_INVALID_IMAGE_PIXELS)
+        if query:
+            clauses.append("a.id LIKE ?")
+            params.append(f"%{query}%")
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        stats = conn.execute(
+            f"SELECT COUNT(*),COALESCE(SUM(COALESCE(a.byte_size,0)),0) FROM image_assets a{where}",
+            params,
+        ).fetchone()
+        total, total_bytes = int(stats[0]), int(stats[1])
+        rows = conn.execute(
+            f"""SELECT a.id,a.path,a.width,a.height,a.byte_size,a.mime,a.version,a.created_at,a.updated_at,
+                       EXISTS(SELECT 1 FROM image_blacklist b WHERE b.asset_id=a.id) AS blacklisted,
+                       (SELECT COUNT(*) FROM image_refs r WHERE r.asset_id=a.id) AS ref_count
+                FROM image_assets a{where}
+                ORDER BY a.created_at DESC,a.id DESC LIMIT ? OFFSET ?""",
+            (*params, limit, offset),
+        ).fetchall()
+        assets = []
+        for row in rows:
+            asset = dict(row)
+            asset["url"] = f"/api/image/library/{asset['id']}.img?v={asset['version']}"
+            asset["news_titles"] = []
+            assets.append(asset)
+        if assets:
+            asset_ids = [asset["id"] for asset in assets]
+            placeholders = ",".join("?" for _ in asset_ids)
+            refs = conn.execute(
+                f"""SELECT r.asset_id,i.ai_title FROM image_refs r
+                    JOIN items i ON i.id=r.item_id
+                    WHERE r.asset_id IN ({placeholders})
+                    ORDER BY i.collected_at DESC,i.id DESC""",
+                asset_ids,
+            ).fetchall()
+            titles_by_asset = {asset_id: [] for asset_id in asset_ids}
+            for ref in refs:
+                title = str(ref["ai_title"] or "").strip()
+                if title:
+                    titles_by_asset[ref["asset_id"]].append(title)
+            for asset in assets:
+                asset["news_titles"] = titles_by_asset.get(asset["id"], [])
+        return {"assets": assets, "total": total, "total_bytes": total_bytes,
+                "offset": offset, "limit": limit, "mode": mode}
+    finally:
+        conn.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HXDashboard/3.0"
 
@@ -911,6 +975,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
         try:
+            if path == "/api/picdb/images":
+                if not self.auth():
+                    return self.fail("invalid token", 401)
+                return self.ok(picdb_images(
+                    offset=self.query_int("offset", 0),
+                    limit=self.query_int("limit", 48) or 48,
+                    mode=self.query_text("mode", "all"),
+                    query=self.query_text("q"),
+                ))
             if path == "/api/state":
                 return self.ok(state())
             if path == "/api/snapshot":
@@ -969,6 +1042,8 @@ class Handler(BaseHTTPRequestHandler):
         # 静态文件（前端）
         if path == "/":
             path = "/index.html"
+        elif path == "/picdb" or path == "/picdb/":
+            path = "/picdb.html"
         target = (WEB / path.lstrip("/")).resolve()
         if WEB.resolve() not in target.parents:
             return self.fail("forbidden", 403)
@@ -996,6 +1071,26 @@ class Handler(BaseHTTPRequestHandler):
                 enabled = bool(payload.get("enabled"))
                 value = start_service(name) if enabled else stop_service(name)
                 return self.ok({"service": name, "enabled": enabled, "value": value})
+            if path == "/api/picdb/blacklist":
+                asset_id = str(payload.get("asset_id", "")).strip()
+                blocked = payload.get("blacklisted")
+                if not asset_id or len(asset_id) > 80 or type(blocked) is not bool:
+                    raise ValueError("图片黑名单请求格式错误")
+                from collect.image_store import ImageStore
+                store = ImageStore()
+                with store.locked(), contextlib.closing(sqlite3.connect(DATA / "hx.sqlite3", timeout=30)) as conn:
+                    conn.execute("PRAGMA busy_timeout=30000")
+                    exists = conn.execute("SELECT 1 FROM image_assets WHERE id=?", (asset_id,)).fetchone()
+                    if not exists:
+                        return self.fail("图片资产不存在", 404)
+                    if blocked:
+                        conn.execute("INSERT OR IGNORE INTO image_blacklist(asset_id,blacklisted_at) VALUES(?,?)",
+                                     (asset_id, time.time()))
+                    else:
+                        conn.execute("DELETE FROM image_blacklist WHERE asset_id=?", (asset_id,))
+                    conn.commit()
+                audit("image_blacklist", {"asset_id": asset_id, "blacklisted": blocked})
+                return self.ok({"asset_id": asset_id, "blacklisted": blocked})
             if path == "/api/channels/toggle":
                 return self.ok(toggle_channel(str(payload.get("channel", "")),
                                               bool(payload.get("enabled"))))

@@ -232,6 +232,14 @@ def pending(source: str = "", db_file=None) -> list:
         conn.close()
     if source:
         items = [it for it in items if it["pushed"].get(source) is not True]
+        conn = connect(db_file)
+        try:
+            blocked = {int(row[0]) for row in conn.execute(
+                "SELECT DISTINCT item_id FROM push_attempts WHERE source=? AND status='blocked'",
+                (source,))}
+        finally:
+            conn.close()
+        items = [it for it in items if int(it["id"]) not in blocked]
     return items
 
 
@@ -240,8 +248,10 @@ def pending_for_sources(sources, db_file=None) -> list:
     wanted = [str(s) for s in (sources or []) if str(s)]
     if not wanted:
         return []
-    return [it for it in pending(db_file=db_file)
-            if any(it["pushed"].get(s) is not True for s in wanted)]
+    by_source = {source: {it["id"] for it in pending(source=source, db_file=db_file)}
+                 for source in wanted}
+    available = set().union(*by_source.values()) if by_source else set()
+    return [it for it in pending(db_file=db_file) if it["id"] in available]
 
 
 def is_pushed(item: dict, source: str) -> bool:
@@ -257,15 +267,21 @@ def pending_count(db_file=None, sources=None) -> int:
     conn = connect(db_file)
     try:
         known = _registry(conn) if sources is None else [str(s) for s in sources if str(s)]
-        rows = conn.execute(f"SELECT pushed FROM items WHERE {PASSED_SQL} "
+        rows = conn.execute(f"SELECT id,pushed FROM items WHERE {PASSED_SQL} "
                             "AND CAST(ts AS INTEGER) >= ?",
                             (_pending_cutoff_ts(),)).fetchall()
+        blocked = {}
+        for source in known:
+            blocked[source] = {int(row[0]) for row in conn.execute(
+                "SELECT DISTINCT item_id FROM push_attempts WHERE source=? AND status='blocked'",
+                (source,))}
     finally:
         conn.close()
     if not known:
         return len(rows) if sources is None else 0
     return sum(1 for row in rows
-               if any(_parse_pushed(row["pushed"]).get(s) is not True for s in known))
+               if any(_parse_pushed(row["pushed"]).get(s) is not True
+                      and int(row["id"]) not in blocked.get(s, set()) for s in known))
 
 
 def describe(db_file=None) -> str:
@@ -278,10 +294,9 @@ def describe(db_file=None) -> str:
     if not known:
         count = pending_count(db_file)
         return f"未注册 source；decision=发 共 {count} 条"
-    items = pending(db_file=db_file)
     parts = []
     for source in known:
-        left = sum(1 for it in items if it["pushed"].get(source) is not True)
+        left = len(pending(source=source, db_file=db_file))
         parts.append(f"{source} 待发 {left}")
     return " · ".join(parts)
 

@@ -34,8 +34,10 @@ class SequenceNumberError(RuntimeError):
 
 
 class ServerError(RuntimeError):
-    def __init__(self, msg):
+    def __init__(self, msg, code=None, err_code=None):
         self.msgs = msg
+        self.code = code
+        self.err_code = err_code
 
     def __str__(self):
         return self.msgs

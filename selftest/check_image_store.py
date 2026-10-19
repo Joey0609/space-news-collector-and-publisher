@@ -61,7 +61,7 @@ class Tests(unittest.TestCase):
         stored=cv2.imdecode(np.frombuffer(Path(path).read_bytes(),np.uint8),cv2.IMREAD_COLOR)
         self.assertEqual(stored.shape[:2],image.shape[:2])
     def test_upgrade_stable_path_original_encoding_and_refs(self):
-        high=picture();low=cv2.resize(high,(128,128),interpolation=cv2.INTER_AREA)
+        high=picture();low=cv2.resize(high,(129,129),interpolation=cv2.INTER_AREA)
         path=self.store.store(encoded(low,quality=85));initial=self.asset(path)
         with contextlib.closing(self.store.connect()) as c:
             c.executemany('INSERT INTO items(id,images) VALUES(?,?)',[(1,json.dumps([path])),(2,json.dumps([path]))])
@@ -77,7 +77,7 @@ class Tests(unittest.TestCase):
         before=Path(path).read_bytes();self.store.store(encoded(enlarged))
         self.assertEqual(before,Path(path).read_bytes())
     def test_recovery_after_file_replace_before_commit(self):
-        path=self.store.store(encoded(cv2.resize(picture(),(128,128),interpolation=cv2.INTER_AREA)));data=encoded(picture(),'.png')
+        path=self.store.store(encoded(cv2.resize(picture(),(129,129),interpolation=cv2.INTER_AREA)));data=encoded(picture(),'.png')
         with patch.object(self.store,'_finalize',side_effect=RuntimeError('interrupted')):
             with self.assertRaises(RuntimeError): self.store.store(data)
         repaired=ImageStore(self.db,self.images)
@@ -101,7 +101,7 @@ class Tests(unittest.TestCase):
         with contextlib.closing(self.store.connect()) as c:
             self.assertEqual(c.execute('SELECT COUNT(*) FROM image_assets').fetchone()[0],1)
     def test_plain_upscale_does_not_replace(self):
-        low=cv2.resize(picture(),(128,128),interpolation=cv2.INTER_AREA)
+        low=cv2.resize(picture(),(129,129),interpolation=cv2.INTER_AREA)
         data=encoded(low);path=self.store.store(data)
         decoded=cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR)
         self.assertEqual(path,self.store.store(encoded(cv2.resize(decoded,(512,512),interpolation=cv2.INTER_LINEAR))))
@@ -114,12 +114,20 @@ class Tests(unittest.TestCase):
     def test_same_message_best_only_and_low_duplicate_no_file(self):
         from collect.image_store import deduplicate_message_images
         image=picture();low=self.root/'low.jpg';high=self.root/'high.png'
-        low.write_bytes(encoded(cv2.resize(image,(128,128),interpolation=cv2.INTER_AREA)))
+        low.write_bytes(encoded(cv2.resize(image,(129,129),interpolation=cv2.INTER_AREA)))
         high.write_bytes(encoded(image,'.png'))
         self.assertEqual(deduplicate_message_images([str(low),str(high),str(low),str(high)]),[str(high)])
         path=self.store.store(high.read_bytes())
         with patch('collect.image_store.tempfile.NamedTemporaryFile',side_effect=AssertionError('low duplicate written')):
             self.assertEqual(self.store.store(low.read_bytes()),path)
+    def test_images_at_or_below_128_by_128_are_not_stored(self):
+        data=encoded(cv2.resize(picture(),(128,128),interpolation=cv2.INTER_AREA))
+        self.assertEqual(self.store.store(data),'')
+        with contextlib.closing(self.store.connect()) as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM image_assets').fetchone()[0],0)
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM image_signatures').fetchone()[0],0)
+        self.assertEqual(list(self.store.library.glob('*.img')),[])
+        self.assertEqual(list(self.store.library.glob('*.pending')),[])
     def test_alison_text_first_images_separate_and_resume(self):
         from distribute.alison.ali_core import delivery
         a=self.root/'a.jpg';b=self.root/'b.jpg';a.write_bytes(b'first');b.write_bytes(b'second')
@@ -137,7 +145,7 @@ class Tests(unittest.TestCase):
         import threading,urllib.request
         from http.server import ThreadingHTTPServer
         from dashboard import server
-        path=self.store.store(encoded(cv2.resize(picture(),(128,128),interpolation=cv2.INTER_AREA)))
+        path=self.store.store(encoded(cv2.resize(picture(),(129,129),interpolation=cv2.INTER_AREA)))
         with patch.object(server,'DATA',self.root/'data'):
             httpd=ThreadingHTTPServer(('127.0.0.1',0),server.Handler)
             threading.Thread(target=httpd.serve_forever,daemon=True).start()
@@ -151,7 +159,7 @@ class Tests(unittest.TestCase):
             finally: httpd.shutdown();httpd.server_close()
     def test_standalone_old_tool_dry_run_apply_resume(self):
         from tools.compact_images import compact
-        low=self.images/'a.jpg';high=self.images/'b.png';low.write_bytes(encoded(cv2.resize(picture(),(128,128),interpolation=cv2.INTER_AREA)));high.write_bytes(encoded(picture(),'.png'))
+        low=self.images/'a.jpg';high=self.images/'b.png';low.write_bytes(encoded(cv2.resize(picture(),(129,129),interpolation=cv2.INTER_AREA)));high.write_bytes(encoded(picture(),'.png'))
         state=self.root/'data/state';state.mkdir(parents=True);baseline=state/'baseline.json';baseline.write_bytes(b'unchanged')
         with contextlib.closing(self.store.connect()) as c:
             c.execute('INSERT INTO items VALUES(1,?,1)',(json.dumps([str(low),str(high)]),));c.commit()

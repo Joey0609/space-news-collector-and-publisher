@@ -164,9 +164,11 @@ class ChannelClient:
     def send_status(self, state: str, note: str = "") -> None:
         self.send_json({"type": "status", "state": state, "note": note})
 
-    def send_result(self, source: str, item_id, ok: bool, detail: str = "") -> None:
+    def send_result(self, source: str, item_id, ok: bool, detail: str = "",
+                    terminal: bool = False) -> None:
         self.send_json({"type": "result", "source": source, "item_id": item_id,
-                        "ok": bool(ok), "detail": str(detail or "")[:300]})
+                        "ok": bool(ok), "detail": str(detail or "")[:300],
+                        "terminal": bool(terminal)})
 
     def send_defer(self, source: str, item_id, seconds: float, reason: str = "") -> None:
         self.send_json({"type": "defer", "source": source, "item_id": item_id,
@@ -413,4 +415,5 @@ class ChannelClient:
             self.send_defer(source, item_id, seconds, str(outcome.get("reason") or ""))
             return
         self.send_result(source, item_id, bool(outcome.get("ok", True)),
-                         str(outcome.get("detail") or ""))
+                         str(outcome.get("detail") or ""),
+                         terminal=bool(outcome.get("terminal")))

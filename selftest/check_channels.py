@@ -251,6 +251,28 @@ check("失败尝试写入分发记录并标明失败",
       scalar("SELECT COUNT(*) FROM push_attempts WHERE source='napcat_probe:group_888'"
              " AND status='failed'") == 1)
 
+add_item(5, "Content Probe", "平台判定违规")
+blocked_source = "content_probe:group_555"
+blocked_client = make_client("content_probe", [{"kind": "group_555", "label": "测试群"}])
+blocked_seen = []
+blocked_thread = threading.Thread(
+    target=blocked_client.run_forever,
+    args=(lambda item, source: (blocked_seen.append(item["id"]),
+                                {"ok": False, "terminal": True,
+                                 "detail": "QQ 内容违规 40034006"})[1],),
+    kwargs={"max_rounds": 1}, daemon=True)
+blocked_thread.start()
+blocked_thread.join(timeout=5)
+time.sleep(0.3)
+check("terminal 回执记录为 blocked 且不标记成功",
+      len(blocked_seen) == 1
+      and scalar("SELECT COUNT(*) FROM push_attempts WHERE source=? AND item_id=? AND status='blocked'",
+                 (blocked_source, blocked_seen[0])) == 1
+      and pushed_of(blocked_seen[0]).get(blocked_source) is not True)
+check("blocked 条目从该 source 的待发队列持久排除",
+      all(item["id"] != blocked_seen[0] for item in push_db.pending(blocked_source, db_file=DB)))
+blocked_client.close()
+
 defer_client = make_client("defer_probe", [{"kind": "group_777", "label": "x"}])
 seen_defer = []
 thread3 = threading.Thread(
@@ -263,7 +285,9 @@ wait_for(lambda: bool(seen_defer))
 thread3.join(timeout=5)
 time.sleep(0.3)
 check("defer 的条目也保持未发",
-      seen_defer == [4] and pushed_of(4).get("defer_probe:group_777") is not True, pushed_of(4))
+      len(seen_defer) == 1
+      and pushed_of(seen_defer[0]).get("defer_probe:group_777") is not True,
+      {"seen": seen_defer, "pushed": pushed_of(seen_defer[0]) if seen_defer else {}})
 
 print("[3] 鉴权 / 内置渠道 / 看板口径")
 bad = make_client("bad", [{"kind": "group_1", "label": "x"}])

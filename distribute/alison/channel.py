@@ -71,6 +71,10 @@ class AlisonSender:
                                   lambda body, info: self.runtime.send(group_openid, body, info)):
                 log(f"[已发] @{item.get('account')} id={item.get('id')} group_openid={group_openid}")
                 return {"ok": True}
+            if getattr(self.runtime, "last_error_code", None) == 40034006:
+                detail = "QQ 判定消息内容违规（业务错误码 40034006）；该条目对此群已停止重试"
+                log(f"[永久失败] item={item.get('id')} group_openid={group_openid} code=40034006")
+                return {"ok": False, "terminal": True, "detail": detail}
             return {"ok": False, "detail": self.runtime.last_error or "正文或配图未全部发送成功，将从已发送位置继续重试"}
         except Exception as exc:
             # Never log exception bodies from credential/token exchanges.

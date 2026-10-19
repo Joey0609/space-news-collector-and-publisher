@@ -44,7 +44,7 @@
 | `type` | 字段 | 说明 |
 | --- | --- | --- |
 | `hello` | `channel` `label` `version` `adapter` `targets[]` `capabilities{}` | 注册。`targets[].kind` 是目标（`private` / `group_<群号>`），`label` 只给人看。允许省略 `channel`（用 URL 里的） |
-| `result` | `source` `item_id` `ok` `detail` | 单条回执。`ok=true` → 服务端 `mark_pushed` 并回 `ack` |
+| `result` | `source` `item_id` `ok` `detail` `terminal?` | 单条回执。`ok=true` → 服务端 `mark_pushed` 并回 `ack`；`terminal=true` 表示该 source 对此条目永久停止重试，记为 blocked |
 | `defer` | `source` `item_id` `seconds` `reason` | 现在不能发（静默时段/限流）。条目**保持未发**，服务端 `seconds` 后再试 |
 | `want` | `source` `count` | **拉取模式专用**：我现在要发，给我最多 `count` 条（服务端回 `items`）。只有 `capabilities.pull = true` 的渠道能用 |
 | `status` | `state` `note` | 渠道自报状态：`idle`/`sending`/`error`，看板直接显示 |
@@ -129,6 +129,8 @@ HTTP 状态码仍有意义（200 / 400 / 401 / 404 / 500）。写操作要 `X-HX
 | GET | `/api/channels/endpoint` | `{"ws_url","token","protocol":1}`；必须带 `X-HX-Token`，不得向未授权访问者泄露 token |
 | GET | `/api/stream` | SSE，每 1 秒 `event: state`，`data:` 同 `/api/state` |
 | GET | `/api/image/<相对路径>` | 图片二进制（不变） |
+| GET | `/api/picdb/images?offset=&limit=&mode=&q=` | 图片库唯一资产分页；`mode=all` 列有效图片（含黑名单资产），`blacklist` 列黑名单。返回筛选结果总文件大小 `total_bytes`；每项含本地 `path` 和按入库时间排列的 `news_titles`（仅新闻标题）。需 `X-HX-Token` |
+| POST | `/api/picdb/blacklist` | `{asset_id,blacklisted}` 设置/撤销全库图片黑名单；需 `X-HX-Token`，写入 `audit.jsonl` |
 | GET | `/api/config/<service>` | `collect` / `process` 的配置字段（含 `env` 现值、字段提示） |
 | POST | `/api/config` | `{service, values}` 保存配置 |
 | GET | `/api/config/ai` | token 鉴权，返回接入点列表、`active_id`、配置 `version`；不返回密钥 |
@@ -171,6 +173,9 @@ QQ 官方文档只提供[按 OpenID 获取指定群信息](https://bot.q.qq.com/
 ---
 
 ## 3. 看板页面结构
+
+- `/picdb` 是独立的图片库管理页，不加载主看板侧栏或处理/分发 tab。图片资产按 `created_at` 倒序；卡片完整显示 hash 并支持点击复制。黑名单资产仍显示在图片库，按钮切换为醒目的「移出黑名单」样式。点击图片打开详情，可点遮罩关闭并带开合动画；详情含文件路径与仅显示标题的新闻引用列表。后续与黑名单资产确认匹配的图片不入库、不分发；可在黑名单页撤销。
+- 总像素小于等于 `128*128` 的新图在写入图片库前排除；分发读库时也排除历史遗留的低分辨率资产。
 
 - 顶部栏：标题 + **tab 切换**（`处理` / `分发`）+ 更新时间。
 - **处理** tab：

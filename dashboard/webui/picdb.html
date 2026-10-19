@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>航小麦 · 图片库</title>
+  <link rel="stylesheet" href="/picdb.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="返回航小麦看板">
+      <span class="brand-mark">航</span><span>航小麦图片库</span>
+    </a>
+    <div class="top-note">独立页面 · 本机图片资产</div>
+  </header>
+  <main class="page">
+    <section class="intro">
+      <div><h1>图片库</h1><p>全库共用唯一图片资产。拉黑的图片不会进入后续新闻分发。</p></div>
+      <div class="total"><b id="shown-count">—</b><span>张图片</span><span class="total-size"><span>· 文件大小 </span><strong id="total-size-value">—</strong><span> GB</span></span></div>
+    </section>
+    <section class="toolbar" aria-label="图片筛选">
+      <label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索图片 ID" autocomplete="off"></label>
+      <div class="filters" role="group" aria-label="图片分类">
+        <button class="filter active" data-mode="all">图片库</button>
+        <button class="filter" data-mode="blacklist">黑名单</button>
+      </div>
+      <div class="sort-label">按入库时间倒序 ↓</div>
+    </section>
+    <p id="status" class="status" aria-live="polite">正在读取图片库…</p>
+    <section id="gallery" class="gallery" aria-label="图片资产列表"></section>
+    <div id="empty" class="empty" hidden>当前筛选下没有图片</div>
+    <div id="load-sentinel" class="load-row" aria-live="polite"></div>
+  </main>
+  <dialog id="viewer" class="viewer">
+    <div class="viewer-image"><div id="viewer-current-slide" class="viewer-slide current-slide"></div><div id="viewer-next-slide" class="viewer-slide next-slide"></div><button id="previous" class="arrow previous" aria-label="上一张">‹</button><button id="next" class="arrow next" aria-label="下一张">›</button></div>
+    <section class="viewer-info">
+      <button id="viewer-close" class="close" aria-label="关闭">×</button>
+      <h2 id="viewer-title"></h2>
+      <p id="viewer-date"></p><p id="viewer-dimensions"></p><p id="viewer-size"></p>
+      <div class="path-block"><span>文件路径</span><button id="viewer-path" class="copy-path" type="button" title="点击复制路径"></button></div>
+      <p id="viewer-refs"></p>
+      <section class="news-block"><h3>应用此图片的新闻</h3><ul id="viewer-news"></ul></section>
+      <button id="viewer-blacklist" class="blacklist"></button>
+      <small>使用 ← / → 键浏览</small>
+    </section>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/picdb.js" defer></script>
+</body>
+</html>

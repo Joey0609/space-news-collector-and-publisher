@@ -17,7 +17,7 @@ SCHEMA += """CREATE TABLE IF NOT EXISTS item_embeddings(
 );
 CREATE INDEX IF NOT EXISTS item_embeddings_model ON item_embeddings(model_version,item_id);
 """
-from collect.image_store import SCHEMA as IMAGE_SCHEMA
+from collect.image_store import SCHEMA as IMAGE_SCHEMA, ensure_image_schema
 SCHEMA += IMAGE_SCHEMA
 
 ITEM_KEYS = frozenset("id platform source origin_id dedup_key account orig_account forward_comment content_type raw ts date ori_url images collected_at quoted_account quoted_raw quoted_url zh quoted_zh ai_title ai_summary importance ai_score ai_tags repeat_of decision invalid_reason stage analysis_attempts analysis_error processed_at rev pushed".split())
@@ -25,6 +25,7 @@ ITEM_KEYS = frozenset("id platform source origin_id dedup_key account orig_accou
 def ensure_schema(c):
  """创建唯一的新结构；不升级或兼容旧字段。"""
  c.executescript(SCHEMA)
+ ensure_image_schema(c)
  columns={r[1] for r in c.execute('PRAGMA table_info(items)')}
  if columns != ITEM_KEYS:
   raise RuntimeError('数据库结构不是单次分析版本；请停机执行 tools/reset_analysis_data.py --apply')

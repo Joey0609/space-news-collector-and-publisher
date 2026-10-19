@@ -133,6 +133,7 @@ class BotRuntime:
         self.client = None
         self.thread = None
         self.last_error = ""
+        self.last_error_code = None
 
     def start(self) -> bool:
         appid, secret = credentials(self.settings)
@@ -195,6 +196,7 @@ class BotRuntime:
 
     def send(self, group_openid: str, text: str, file_info: str = "") -> bool:
         self.last_error = ""
+        self.last_error_code = None
         if self.thread is None or not self.thread.is_alive():
             self.last_error = "QQ 长连接未启动或已停止"
             return False
@@ -215,7 +217,10 @@ class BotRuntime:
             future.cancel()
             self.last_error = "QQ 发送等待超时"
         except Exception as exc:
-            self.last_error = f"QQ 发送失败（{type(exc).__name__}）"
+            code = getattr(exc, "code", None) or getattr(exc, "err_code", None)
+            self.last_error_code = code
+            code_note = f"；业务错误码={code}" if code is not None else ""
+            self.last_error = f"QQ 发送失败（{type(exc).__name__}{code_note}）"
         return False
 
 

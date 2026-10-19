@@ -22,7 +22,9 @@ SCHEMA = '''
 CREATE TABLE IF NOT EXISTS image_assets(
  id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,sha256 TEXT NOT NULL,mime TEXT NOT NULL,
  width INTEGER,height INTEGER,byte_size INTEGER,quality REAL,phash TEXT,preview BLOB,
- version INTEGER NOT NULL DEFAULT 1,updated_at REAL NOT NULL);
+ version INTEGER NOT NULL DEFAULT 1,created_at REAL NOT NULL DEFAULT 0,updated_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS image_blacklist(
+ asset_id TEXT PRIMARY KEY,blacklisted_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS image_signatures(sha256 TEXT PRIMARY KEY,asset_id TEXT NOT NULL,phash TEXT);
 CREATE INDEX IF NOT EXISTS image_signatures_asset ON image_signatures(asset_id);
 CREATE TABLE IF NOT EXISTS image_hash_buckets(band INTEGER,value INTEGER,asset_id TEXT,
@@ -40,6 +42,16 @@ CREATE INDEX IF NOT EXISTS image_refs_asset ON image_refs(asset_id,item_id);
 CREATE TABLE IF NOT EXISTS image_pending(id TEXT PRIMARY KEY,temporary TEXT NOT NULL,metadata TEXT NOT NULL);
 '''
 _thread_lock = threading.RLock()
+MAX_INVALID_IMAGE_PIXELS = 128 * 128
+
+
+def ensure_image_schema(conn):
+    """Create image tables and migrate timestamps for existing assets."""
+    conn.executescript(SCHEMA)
+    columns={row[1] for row in conn.execute('PRAGMA table_info(image_assets)')}
+    if 'created_at' not in columns:
+        conn.execute('ALTER TABLE image_assets ADD COLUMN created_at REAL NOT NULL DEFAULT 0')
+    conn.execute('UPDATE image_assets SET created_at=updated_at WHERE created_at=0')
 
 
 def atomic_replace(source,target):
@@ -92,17 +104,19 @@ def _pack_features(points, descriptors):
 def features(data):
     mime, _ = encoded_type(data)
     result = dict(sha256=hashlib.sha256(data).hexdigest(), mime=mime, width=0, height=0,
-                  byte_size=len(data), quality=0.0, phash='', preview='')
+                  byte_size=len(data), quality=0.0, phash='', preview='', alpha_channel=False)
     # 动画、矢量图只按原始字节去重，避免第一帧相同就丢失后续内容。
     if mime in ('image/gif', 'image/svg+xml', 'application/octet-stream') or (mime=='image/webp' and b'ANIM' in data[:1024]) or (mime=='image/png' and b'acTL' in data[:1024]):
         return result
     image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
     if image is None: return result
     result.update(height=image.shape[0],width=image.shape[1])
-    if image.dtype != np.uint8: return result
+    if image.ndim == 3 and image.shape[2] in (2, 4):
+        result['alpha_channel'] = True
+        image = image[:, :, :1] if image.shape[2] == 2 else image[:, :, :3]
+    if image.dtype != np.uint8 and not (image.dtype == np.uint16 and result['alpha_channel']): return result
     if image.ndim == 2: image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    # 透明图不参与近似合并，避免忽略透明度的区别。
-    if image.shape[2] == 4: return result
+    # 按图片主体颜色计算特征，Alpha 通道不参与判重。
     image = cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR)
     height, width = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -271,7 +285,7 @@ class ImageStore:
         self.library=self.root/'library'
         self.library.mkdir(parents=True,exist_ok=True)
         self.database.parent.mkdir(parents=True,exist_ok=True)
-        with contextlib.closing(self.connect()) as conn: conn.executescript(SCHEMA); conn.commit()
+        with contextlib.closing(self.connect()) as conn: ensure_image_schema(conn); conn.commit()
         with self.locked(),contextlib.closing(self.connect()) as conn: self.recover(conn)
 
     def connect(self):
@@ -307,15 +321,16 @@ class ImageStore:
                     else: fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
 
     def _finalize(self,conn,ident,metadata):
-        old=conn.execute('SELECT version FROM image_assets WHERE id=?',(ident,)).fetchone()
+        old=conn.execute('SELECT version,created_at FROM image_assets WHERE id=?',(ident,)).fetchone()
         preview=bytes.fromhex(metadata['preview'])
         path=str(self.library/(ident+'.img'))
-        conn.execute('''INSERT INTO image_assets(id,path,sha256,mime,width,height,byte_size,quality,phash,preview,version,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sha256=excluded.sha256,mime=excluded.mime,
+        conn.execute('''INSERT INTO image_assets(id,path,sha256,mime,width,height,byte_size,quality,phash,preview,version,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sha256=excluded.sha256,mime=excluded.mime,
           width=excluded.width,height=excluded.height,byte_size=excluded.byte_size,quality=excluded.quality,
           phash=excluded.phash,preview=excluded.preview,version=excluded.version,updated_at=excluded.updated_at''',
           (ident,path,metadata['sha256'],metadata['mime'],metadata['width'],metadata['height'],metadata['byte_size'],
-           metadata['quality'],metadata['phash'],preview,old['version']+1 if old else 1,time.time()))
+           metadata['quality'],metadata['phash'],preview,old['version']+1 if old else 1,
+           old['created_at'] if old and 'created_at' in old.keys() else time.time(),time.time()))
         self._signature(conn,ident,metadata)
         if old and conn.execute("SELECT 1 FROM sqlite_master WHERE name='items'").fetchone():
             conn.execute('UPDATE items SET rev=rev+1 WHERE id IN(SELECT item_id FROM image_refs WHERE asset_id=?)',(ident,))
@@ -357,9 +372,9 @@ class ImageStore:
             self._finalize(conn,row['id'],metadata)
 
     def _asset_features(self,conn,asset):
+        asset=dict(asset)
         row=conn.execute('SELECT * FROM image_local_features WHERE asset_id=?',(asset['id'],)).fetchone()
         if row:
-            asset=dict(asset)
             asset.update(local_points=bytes(row['points']).hex(),local_descriptors=bytes(row['descriptors']).hex(),
                          local_width=row['width'],local_height=row['height'])
             return asset
@@ -387,7 +402,7 @@ class ImageStore:
 
     def candidate(self,conn,metadata):
         exact=conn.execute('SELECT a.* FROM image_signatures s JOIN image_assets a ON a.id=s.asset_id WHERE s.sha256=?',(metadata['sha256'],)).fetchone()
-        if exact and (Path(exact['path']).is_file() or exact['sha256']==metadata['sha256']): return exact
+        if exact and (Path(exact['path']).is_file() or exact['sha256']==metadata['sha256']): return dict(exact)
         if not metadata['phash']: return None
         votes={}
         probes=metadata.get('crop_hashes') or [metadata['phash']]
@@ -409,16 +424,26 @@ class ImageStore:
             if not old or not Path(old['path']).is_file():continue
             old=self._asset_features(conn,old)
             match=picture_match(metadata,old)
-            if match:matches.append((match,old))
+            if match:
+                blacklisted=conn.execute('SELECT 1 FROM image_blacklist WHERE asset_id=?',(ident,)).fetchone() is not None
+                matches.append((blacklisted,match,old))
         if not matches:return None
-        # Maximize geometric confidence first; coverage comparison runs only after confirmation.
-        return max(matches,key=lambda pair:(pair[0]['inliers'],pair[0]['new_area']+pair[0]['old_area']))[1]
+        # Any geometrically confirmed blacklisted match takes precedence over a non-blacklisted alias.
+        # Otherwise maximize geometric confidence first; coverage comparison follows confirmation.
+        return max(matches,key=lambda row:(row[0],row[1]['inliers'],row[1]['new_area']+row[1]['old_area']))[2]
 
     def store(self,data, fallback_path=None, prepared=None):
         metadata=prepared or features(data)
+        width=int(metadata.get('width') or 0);height=int(metadata.get('height') or 0)
+        if width>0 and height>0 and width*height<=MAX_INVALID_IMAGE_PIXELS:
+            log(f'[图片排除] 分辨率过低 {width}x{height}，不入库不分发')
+            return ''
         with self.locked(),contextlib.closing(self.connect()) as conn:
             self.recover(conn)
             old=self.candidate(conn,metadata)
+            if old and conn.execute('SELECT 1 FROM image_blacklist WHERE asset_id=?',(old['id'],)).fetchone():
+                log(f'[图片黑名单] 命中 {old["id"]}，不入库不分发')
+                return ''
             if old and Path(old['path']).is_file() and (old['sha256']==metadata['sha256'] or not better_picture(metadata,old)):
                 self._signature(conn,old['id'],metadata,replace_features=False); conn.commit()
                 return old['path']

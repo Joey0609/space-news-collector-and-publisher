@@ -435,7 +435,8 @@ class ChannelSession:
                 slot[item_id] = now
         self.send({"type": "items", "source": source, "items": picked})
 
-    def handle_result(self, source: str, item_id, ok: bool, detail: str = "") -> None:
+    def handle_result(self, source: str, item_id, ok: bool, detail: str = "",
+                      terminal: bool = False) -> None:
         """拉取模式的回执：直接落库（推送模式走 acks 队列，由推送线程处理）。"""
         if source not in self.sources:
             return
@@ -446,8 +447,13 @@ class ChannelSession:
             return
         slot.pop(item_key, None)
         if not ok:
-            self._record_attempt(source, item_id, "failed", detail or "未说明")
-            print(f"[渠道:{self.id}] {source} 条目 {item_id} 发送失败：{detail or '未说明'}", flush=True)
+            status = "blocked" if terminal else "failed"
+            self._record_attempt(source, item_id, status, detail or "未说明")
+            if terminal:
+                print(f"[渠道:{self.id}] {source} 条目 {item_id} 已永久停止重试："
+                      f"{detail or '未说明'}", flush=True)
+            else:
+                print(f"[渠道:{self.id}] {source} 条目 {item_id} 发送失败：{detail or '未说明'}", flush=True)
             return
         try:
             push_db.mark_pushed([item_id], source)
@@ -586,6 +592,11 @@ class ChannelSession:
                   f"（{reply.get('reason') or '未说明'}）", flush=True)
             return
         if kind == "result":
+            if reply.get("terminal"):
+                detail = str(reply.get("detail") or "永久失败")
+                self._record_attempt(source, item["id"], "blocked", detail)
+                print(f"[渠道:{self.id}] {source} 条目 {item['id']} 已永久停止重试：{detail}", flush=True)
+                return
             self._retry_later(source, item["id"], FAIL_BACKOFF)
             self._record_attempt(source, item["id"], "failed", str(reply.get("detail") or "未说明"))
             print(f"[渠道:{self.id}] {source} 条目 {item['id']} 发送失败："
@@ -665,7 +676,8 @@ def handle_message(connection, message: dict) -> None:
         if session.pull:
             session.handle_result(str(message.get("source") or ""),
                                   message.get("item_id"), bool(message.get("ok")),
-                                  str(message.get("detail") or ""))
+                                  str(message.get("detail") or ""),
+                                  bool(message.get("terminal")))
         else:
             # 只认当前在途的那条（防止乱序/重放把别的条目标成已发）
             session.deliver(message)

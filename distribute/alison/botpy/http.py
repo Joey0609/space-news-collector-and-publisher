@@ -82,7 +82,11 @@ async def _handle_response(response: ClientResponse) -> Union[Dict[str, Any], st
         # type of data should be dict or str or None, so there should be a condition to check and prevent bug
         message = data["message"] if isinstance(data, dict) else str(data)
         if not error_dict_get:
-            raise ServerError(message) from None  # adding from None to prevent chain exception being raised
+            raise ServerError(
+                message,
+                code=data.get("code") if isinstance(data, dict) else None,
+                err_code=data.get("err_code") if isinstance(data, dict) else None,
+            ) from None  # adding from None to prevent chain exception being raised
         raise error_dict_get(msg=message) from None
 
 

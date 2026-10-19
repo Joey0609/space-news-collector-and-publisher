@@ -752,7 +752,7 @@ function renderPushes(pushes, errorText = "") {
   }
   body.innerHTML = pushes.map((push) => {
     const target = push.label || push.kind || push.source || "—";
-    const status = push.status === "success" ? "成功" : push.status === "sent_unrecorded" ? "已送达，待记账" : "失败";
+    const status = push.status === "success" ? "成功" : push.status === "sent_unrecorded" ? "已送达，待记账" : push.status === "blocked" ? "已停止重试" : "失败";
     return `<tr>
       <td class="mono">${esc(formatTime(push.sent_at))}</td>
       <td>${esc(push.channel || "—")}</td>
